@@ -173,6 +173,7 @@ async def _run_deliberation(session_id: str):
         opening = await agent_turn(
             AGENT_MAP["Phoebe"]["system"],
             [{"role": "user", "content": f"Open a swarm deliberation on this topic: {topic}. Set the frame for the other agents. Be concise."}],
+            agent_name="Phoebe",
         )
         conversation.append({"role": "assistant", "content": f"Phoebe: {opening}"})
         await emit("Phoebe", opening, 0, "decision")
@@ -191,7 +192,7 @@ async def _run_deliberation(session_id: str):
                     m["content"] for m in conversation[-10:]
                 ) + f"\n\nRespond as {name} in round {round_num}. React to what others said. Be concise (2-3 sentences)."
 
-                text = await agent_turn(agent["system"], [{"role": "user", "content": prompt}])
+                text = await agent_turn(agent["system"], [{"role": "user", "content": prompt}], agent_name=name)
                 conversation.append({"role": "assistant", "content": f"{name}: {text}"})
                 await emit(name, text, round_num)
                 await asyncio.sleep(2)
@@ -202,7 +203,7 @@ async def _run_deliberation(session_id: str):
                     m["content"] for m in conversation[-5:]
                 ) + "\n\nSynthesize this round. What's the emerging consensus? What needs more debate? Be concise."
 
-                synth = await agent_turn(AGENT_MAP["Phoebe"]["system"], [{"role": "user", "content": synth_prompt}])
+                synth = await agent_turn(AGENT_MAP["Phoebe"]["system"], [{"role": "user", "content": synth_prompt}], agent_name="Phoebe")
                 conversation.append({"role": "assistant", "content": f"Phoebe: {synth}"})
                 await emit("Phoebe", synth, round_num, "decision")
                 await asyncio.sleep(2)
@@ -212,7 +213,7 @@ async def _run_deliberation(session_id: str):
             m["content"] for m in conversation[-15:]
         ) + "\n\nAnnounce the swarm's final decision. This is the consensus. Be definitive."
 
-        final = await agent_turn(AGENT_MAP["Phoebe"]["system"], [{"role": "user", "content": final_prompt}])
+        final = await agent_turn(AGENT_MAP["Phoebe"]["system"], [{"role": "user", "content": final_prompt}], agent_name="Phoebe")
         conversation.append({"role": "assistant", "content": f"Phoebe: {final}"})
         await emit("Phoebe", final, ROUNDS, "consensus")
 
@@ -223,7 +224,7 @@ async def _run_deliberation(session_id: str):
             await asyncio.sleep(1)
 
             art_prompt_req = f"Based on this deliberation:\n{final}\n\nWrite a single concise image generation prompt (under 100 words) for a token logo. Style: minimalist, gold on black, geometric, crypto-native. No text in the image."
-            art_prompt = await agent_turn(AGENT_MAP["Claire"]["system"], [{"role": "user", "content": art_prompt_req}])
+            art_prompt = await agent_turn(AGENT_MAP["Claire"]["system"], [{"role": "user", "content": art_prompt_req}], agent_name="Claire")
             conversation.append({"role": "assistant", "content": f"Claire: {art_prompt}"})
             await emit("Claire", f"Art prompt: {art_prompt}", art_round, "tool_call")
             await asyncio.sleep(2)
