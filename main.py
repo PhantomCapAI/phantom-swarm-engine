@@ -49,6 +49,9 @@ async def startup_event():
 # In-memory session store
 sessions: dict[str, dict] = {}
 
+# Scheduled deliberations
+scheduled_sessions: list[dict] = []
+
 ROUNDS = 3
 
 
@@ -64,6 +67,61 @@ async def trigger_report(request: Request):
         return JSONResponse(status_code=403, content={"error": "unauthorized"})
     await daily_report()
     return {"status": "report_sent"}
+
+
+@app.post("/swarm/schedule")
+async def swarm_schedule(request: Request):
+    """Schedule a deliberation for a future time."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+
+    body = await request.json()
+    topic = body.get("topic", "")
+    run_at = body.get("run_at", "")  # ISO format datetime
+    free_mode = body.get("free_mode", True)
+
+    if not topic or not run_at:
+        return JSONResponse(status_code=400, content={"error": "topic and run_at (ISO datetime) required"})
+
+    from dateutil.parser import isoparse
+    try:
+        trigger_time = isoparse(run_at)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "run_at must be valid ISO datetime"})
+
+    job_id = str(uuid.uuid4())[:8]
+
+    async def _run_scheduled():
+        sid = str(uuid.uuid4())[:8]
+        sessions[sid] = {
+            "topic": topic,
+            "free_mode": free_mode,
+            "status": "started",
+            "messages": [],
+            "current_round": 0,
+            "events": asyncio.Queue(),
+        }
+        # Remove from scheduled list
+        scheduled_sessions[:] = [s for s in scheduled_sessions if s["job_id"] != job_id]
+        await _run_deliberation(sid)
+
+    scheduler.add_job(_run_scheduled, "date", run_date=trigger_time, id=job_id)
+
+    entry = {
+        "job_id": job_id,
+        "topic": topic,
+        "run_at": run_at,
+        "free_mode": free_mode,
+    }
+    scheduled_sessions.append(entry)
+
+    return {"job_id": job_id, "topic": topic, "run_at": run_at, "status": "scheduled"}
+
+
+@app.get("/swarm/scheduled")
+async def swarm_scheduled():
+    """List all upcoming scheduled deliberations."""
+    return {"scheduled": scheduled_sessions, "count": len(scheduled_sessions)}
 
 
 @app.post("/swarm/art")

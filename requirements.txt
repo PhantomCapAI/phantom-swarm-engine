@@ -4,3 +4,4 @@ httpx==0.28.1
 sse-starlette==2.3.3
 tweepy==4.14.0
 apscheduler==3.10.4
+python-dateutil==2.9.0
