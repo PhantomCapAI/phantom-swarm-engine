@@ -4,13 +4,16 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+import hashlib
+
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
 from agents import AGENTS, AGENT_MAP
 from llm import agent_turn
+from art import generate_art, store_image, get_image
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -37,6 +40,37 @@ ROUNDS = 3
 @app.get("/health")
 async def health():
     return {"status": "alive", "engine": "phantom-swarm"}
+
+
+@app.post("/swarm/art")
+async def swarm_art(request: Request):
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+
+    body = await request.json()
+    prompt = body.get("prompt", "")
+    style = body.get("style", "default")
+
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt required"})
+
+    result = await generate_art(prompt=prompt, style=style, aspect="1:1")
+
+    if result.get("image_b64"):
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
+        image_url = store_image(prompt_hash, result["image_b64"])
+        result["image_url"] = image_url
+        del result["image_b64"]
+
+    return result
+
+
+@app.get("/swarm/art/image/{image_id}")
+async def serve_art_image(image_id: str):
+    img_bytes = get_image(image_id)
+    if not img_bytes:
+        return JSONResponse(status_code=404, content={"error": "image not found"})
+    return Response(content=img_bytes, media_type="image/png")
 
 
 @app.post("/swarm/start")
@@ -181,6 +215,30 @@ async def _run_deliberation(session_id: str):
         final = await agent_turn(AGENT_MAP["Phoebe"]["system"], [{"role": "user", "content": final_prompt}])
         conversation.append({"role": "assistant", "content": f"Phoebe: {final}"})
         await emit("Phoebe", final, ROUNDS, "consensus")
+
+        # Art round — generate token art if topic involves a launch
+        art_round = ROUNDS + 1
+        if any(kw in topic.lower() for kw in ["token", "launch", "name", "$", "ticker"]):
+            await emit("Claire", "Generating visual direction for the token...", art_round, "tool_call")
+            await asyncio.sleep(1)
+
+            art_prompt_req = f"Based on this deliberation:\n{final}\n\nWrite a single concise image generation prompt (under 100 words) for a token logo. Style: minimalist, gold on black, geometric, crypto-native. No text in the image."
+            art_prompt = await agent_turn(AGENT_MAP["Claire"]["system"], [{"role": "user", "content": art_prompt_req}])
+            conversation.append({"role": "assistant", "content": f"Claire: {art_prompt}"})
+            await emit("Claire", f"Art prompt: {art_prompt}", art_round, "tool_call")
+            await asyncio.sleep(2)
+
+            art_result = await generate_art(prompt=art_prompt, style="geometric", aspect="1:1")
+
+            if art_result.get("image_b64"):
+                prompt_hash = hashlib.md5(art_prompt.encode()).hexdigest()[:12]
+                image_url = store_image(prompt_hash, art_result["image_b64"])
+                await emit("Nova", f"Token art generated. Model: {art_result['model_used']}, Cost: ${art_result['cost']}", art_round, "tool_call")
+                session["image_url"] = image_url
+            elif art_result.get("error"):
+                await emit("Nova", f"Art generation skipped: {art_result['error'][:100]}", art_round, "message")
+            else:
+                await emit("Nova", "Art generation unavailable — SEGMIND_API_KEY not configured.", art_round, "message")
 
         session["status"] = "completed"
 
