@@ -14,6 +14,7 @@ from sse_starlette import EventSourceResponse
 from agents import AGENTS, AGENT_MAP
 from llm import agent_turn
 from art import generate_art, store_image, get_image
+from twitter import post_tweet, post_thread
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -71,6 +72,76 @@ async def serve_art_image(image_id: str):
     if not img_bytes:
         return JSONResponse(status_code=404, content={"error": "image not found"})
     return Response(content=img_bytes, media_type="image/png")
+
+
+@app.post("/swarm/tweet")
+async def swarm_tweet(request: Request):
+    """Post a single tweet to @phantomcap_ai."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+    body = await request.json()
+    text = body.get("text", "")
+    if not text:
+        return JSONResponse(status_code=400, content={"error": "text required"})
+    return post_tweet(text)
+
+
+@app.post("/swarm/post")
+async def swarm_post(request: Request):
+    """Draft and post a thread from a completed deliberation."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+
+    body = await request.json()
+    session_id = body.get("session_id", "")
+    session = sessions.get(session_id)
+
+    if not session:
+        return JSONResponse(status_code=404, content={"error": "session not found"})
+    if session["status"] != "completed":
+        return JSONResponse(status_code=400, content={"error": "deliberation not completed"})
+
+    # Extract key messages for Claire to draft from
+    msgs = session["messages"]
+    topic = session["topic"]
+    consensus = [m for m in msgs if m["type"] == "consensus"]
+    decisions = [m for m in msgs if m["type"] == "decision"]
+    summary_text = consensus[-1]["text"] if consensus else decisions[-1]["text"] if decisions else "No consensus reached."
+    agent_count = len(set(m["agent"] for m in msgs))
+    msg_count = len(msgs)
+
+    # Claire drafts the thread
+    draft_prompt = f"""You are Claire, content agent for @phantomcap_ai. Draft a 3-tweet thread about this swarm deliberation.
+
+Topic: {topic}
+Agents participated: {agent_count}
+Messages: {msg_count}
+Final decision: {summary_text[:300]}
+
+Rules:
+- Tweet 1: hook — what just happened, make it compelling
+- Tweet 2: the interesting detail — what surprised, who disagreed, what Cipher flagged
+- Tweet 3: the link — direct to genesis.phantomcapital.live
+- Each tweet max 270 chars
+- Anti-slop: raw, specific, no corporate speak
+- Include agent names when referencing their takes
+- Format: return exactly 3 lines, one tweet per line, no numbering"""
+
+    thread_text = await agent_turn(
+        AGENT_MAP["Claire"]["system"],
+        [{"role": "user", "content": draft_prompt}],
+        agent_name="Claire",
+    )
+
+    tweets = [t.strip() for t in thread_text.strip().split("\n") if t.strip()][:3]
+
+    if not tweets:
+        return JSONResponse(status_code=500, content={"error": "Claire failed to draft thread"})
+
+    result = post_thread(tweets)
+    result["tweets"] = tweets
+    result["session_id"] = session_id
+    return result
 
 
 @app.post("/swarm/start")
@@ -242,6 +313,25 @@ async def _run_deliberation(session_id: str):
                 await emit("Nova", "Art generation unavailable — SEGMIND_API_KEY not configured.", art_round, "message")
 
         session["status"] = "completed"
+
+        # Auto-post thread to @phantomcap_ai
+        try:
+            msgs = session["messages"]
+            consensus = [m for m in msgs if m["type"] == "consensus"]
+            summary = consensus[-1]["text"][:300] if consensus else ""
+            agent_count = len(set(m["agent"] for m in msgs))
+
+            draft_prompt = f"Draft a 3-tweet thread for @phantomcap_ai about this swarm deliberation.\nTopic: {topic}\nAgents: {agent_count}, Messages: {len(msgs)}\nDecision: {summary}\nRules: tweet 1 = hook, tweet 2 = interesting detail, tweet 3 = link to genesis.phantomcapital.live. Max 270 chars each. Anti-slop. Return exactly 3 lines."
+            thread_text = await agent_turn(AGENT_MAP["Claire"]["system"], [{"role": "user", "content": draft_prompt}], agent_name="Claire")
+            tweets = [t.strip() for t in thread_text.strip().split("\n") if t.strip()][:3]
+            if tweets:
+                result = post_thread(tweets)
+                if result.get("tweet_ids"):
+                    await emit("Claire", f"Thread posted to @phantomcap_ai ({len(result['tweet_ids'])} tweets)", art_round + 1 if 'art_round' in dir() else ROUNDS + 1, "tool_call")
+                elif result.get("error"):
+                    await emit("Claire", f"Twitter post skipped: {result['error'][:80]}", ROUNDS + 1, "message")
+        except Exception:
+            pass  # Don't fail deliberation over tweet failure
 
     except Exception as e:
         session["status"] = "error"
