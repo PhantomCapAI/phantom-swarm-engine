@@ -15,6 +15,7 @@ from agents import AGENTS, AGENT_MAP
 from llm import agent_turn
 from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
+from cron import run_daily_report, daily_report
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -32,6 +33,19 @@ app.add_middleware(
 
 PHANTOM_INTERNAL_SECRET = os.environ.get("PHANTOM_INTERNAL_SECRET", "")
 
+# Daily cron — 9AM EST (14:00 UTC)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+scheduler = AsyncIOScheduler()
+scheduler.add_job(run_daily_report, "cron", hour=14, minute=0)  # 14:00 UTC = 9:00 AM EST
+
+
+@app.on_event("startup")
+async def startup_event():
+    scheduler.start()
+    print("[cron] Daily report scheduled for 9:00 AM EST (14:00 UTC)")
+
+
 # In-memory session store
 sessions: dict[str, dict] = {}
 
@@ -41,6 +55,15 @@ ROUNDS = 3
 @app.get("/health")
 async def health():
     return {"status": "alive", "engine": "phantom-swarm"}
+
+
+@app.post("/report")
+async def trigger_report(request: Request):
+    """Manually trigger daily report."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+    await daily_report()
+    return {"status": "report_sent"}
 
 
 @app.post("/swarm/art")
