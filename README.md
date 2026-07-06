@@ -50,6 +50,8 @@ Failover is mode-scoped: a "lite" bundle never silently pulls in specialists.
 
 ```
 <slug>/
+  run.py                 runnable multi-agent app (stdlib only)
+  agents.json            runtime agent config
   README.md              manifest.json          bundle.yaml
   prompts/               optimized system prompt + personas
   skills/                runtime-agnostic skill definitions

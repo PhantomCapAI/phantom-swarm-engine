@@ -72,7 +72,14 @@ ROUNDS = 3
 
 @app.get("/health")
 async def health():
-    return {"status": "alive", "engine": "phantom-swarm"}
+    # Surface whether the agents can actually run: they need an OpenRouter key.
+    # Without it the deliberation produces empty turns, so make that visible.
+    return {
+        "status": "alive",
+        "engine": "phantom-swarm",
+        "hive_size": len(AGENT_MAP),
+        "llm_configured": bool(os.environ.get("OPENROUTER_API_KEY")),
+    }
 
 
 @app.post("/report")

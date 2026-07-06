@@ -4,6 +4,7 @@ Run: python -m unittest discover -s tests
 """
 
 import io
+import json
 import unittest
 import zipfile
 
@@ -83,6 +84,17 @@ class GenerateFilesTests(unittest.TestCase):
 
     def test_langgraph_scaffold_is_valid_python(self):
         compile(self.files["targets/langgraph/graph.py"], "graph.py", "exec")
+
+    def test_runnable_runtime_present_and_valid(self):
+        # Every bundle ships a runnable app: run.py + agents.json at the root.
+        self.assertIn("run.py", self.files)
+        self.assertIn("agents.json", self.files)
+        compile(self.files["run.py"], "run.py", "exec")  # run.py is valid Python
+        cfg = json.loads(self.files["agents.json"])
+        self.assertEqual(cfg["name"], self.bp["name"])
+        self.assertTrue(cfg["agents"])
+        self.assertIn("system_prompt", cfg)
+        self.assertIn("default_model", cfg)
 
     def test_zip_is_valid_and_prefixed(self):
         data = bundler.make_zip(self.bp, self.files)
