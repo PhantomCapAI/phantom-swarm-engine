@@ -83,13 +83,18 @@ Targets: `claude-code`, `cursor`, `windsurf`, `config` (default) + `langgraph`
 ```bash
 pip install -r requirements.txt
 
-# Pick a provider (either works — both are OpenAI-compatible):
-export LLM_PROVIDER=openrouter  OPENROUTER_API_KEY=sk-or-...
-#   ...or...
-export LLM_PROVIDER=deepseek    DEEPSEEK_API_KEY=sk-...
+# Config: copy the template and fill in your keys (.env is gitignored and
+# auto-loaded at startup — real env vars still take precedence):
+cp .env.example .env
+#   set LLM_PROVIDER + the matching key (OPENROUTER_API_KEY or DEEPSEEK_API_KEY)
 
-export PHANTOM_INTERNAL_SECRET=changeme      # optional: protects write endpoints
 uvicorn main:app --host 0.0.0.0 --port 8500
+```
+
+Or export the vars directly instead of using `.env`:
+
+```bash
+export LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=sk-...   # or openrouter + its key
 ```
 
 `GET /health` reports the active `llm_provider` and whether it's `llm_configured`.

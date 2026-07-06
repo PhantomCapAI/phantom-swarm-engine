@@ -1,3 +1,5 @@
+import envload  # noqa: F401  — loads .env before anything reads config
+
 import asyncio
 import json
 import os
