@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
 from agents import AGENTS, AGENT_MAP, CREW
-from llm import agent_turn
+from llm import agent_turn, provider_name, configured
 from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
 from cron import run_daily_report, daily_report
@@ -78,7 +78,8 @@ async def health():
         "status": "alive",
         "engine": "phantom-swarm",
         "crew_size": len(CREW),
-        "llm_configured": bool(os.environ.get("OPENROUTER_API_KEY")),
+        "llm_provider": provider_name(),
+        "llm_configured": configured(),
     }
 
 

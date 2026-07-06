@@ -41,7 +41,7 @@ from agents import (
     PACKAGER,
     SAFETY,
 )
-from llm import agent_turn, extract_json, PREMIUM_MODEL
+from llm import agent_turn, extract_json
 import store
 
 BUNDLER_VERSION = "1.0.0"
@@ -500,8 +500,9 @@ RUN_PY = '''#!/usr/bin/env python3
 Usage:
     python run.py "your task here"
 
-Uses OpenRouter if OPENROUTER_API_KEY is set; otherwise prints an offline stub
-so you can see the agent wiring with no API key and no dependencies (stdlib only).
+Runs on OpenRouter or DeepSeek (both OpenAI-compatible). Set either
+OPENROUTER_API_KEY or DEEPSEEK_API_KEY; with neither, prints an offline stub so
+you can see the agent wiring with no key and no dependencies (stdlib only).
 """
 import json
 import os
@@ -516,10 +517,20 @@ def load_config():
         return json.load(f)
 
 
+def _endpoint():
+    # Prefer whatever key is present; DeepSeek if explicitly selected.
+    provider = os.environ.get("LLM_PROVIDER", "").lower()
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    or_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if provider == "deepseek" or (ds_key and not or_key):
+        return "https://api.deepseek.com/chat/completions", ds_key
+    return "https://openrouter.ai/api/v1/chat/completions", or_key
+
+
 def call_llm(model, system, user):
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    url, key = _endpoint()
     if not key:
-        return "[offline stub — set OPENROUTER_API_KEY for real output]"
+        return "[offline stub — set OPENROUTER_API_KEY or DEEPSEEK_API_KEY for real output]"
     body = json.dumps({
         "model": model,
         "messages": [
@@ -529,7 +540,7 @@ def call_llm(model, system, user):
         "max_tokens": 400,
     }).encode()
     req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
+        url,
         data=body,
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
     )
@@ -538,17 +549,21 @@ def call_llm(model, system, user):
     return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 
+def _default_model():
+    url, _ = _endpoint()
+    return "deepseek-chat" if "deepseek" in url else "meta-llama/llama-3.3-70b-instruct"
+
+
 def main():
     task = " ".join(sys.argv[1:]).strip() or "Describe what you do."
     cfg = load_config()
     system_prompt = cfg.get("system_prompt", "")
-    default_model = cfg.get("default_model", "meta-llama/llama-3.3-70b-instruct")
     print("=== " + cfg.get("name", "agent bundle") + " ===")
     transcript = []
     for agent in cfg.get("agents", []):
         sys_p = (system_prompt + "\\n\\n" + agent.get("persona", "")).strip()
         ctx = task if not transcript else task + "\\n\\nConversation so far:\\n" + "\\n".join(transcript)
-        reply = call_llm(agent.get("model") or default_model, sys_p, ctx)
+        reply = call_llm(agent.get("model") or _default_model(), sys_p, ctx)
         line = agent.get("name", "agent") + ": " + reply
         transcript.append(line)
         print("\\n" + line)
@@ -709,7 +724,7 @@ async def _safe_turn(
             agent_name=name,
             max_tokens=max_tokens,
             temperature=temperature,
-            model=PREMIUM_MODEL if premium else None,
+            premium=premium,
         )
     except Exception as e:  # network/API failure => agent is down
         return False, f"error: {str(e)[:120]}"

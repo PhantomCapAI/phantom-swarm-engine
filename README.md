@@ -82,12 +82,20 @@ Targets: `claude-code`, `cursor`, `windsurf`, `config` (default) + `langgraph`
 
 ```bash
 pip install -r requirements.txt
-export OPENROUTER_API_KEY=sk-or-...          # required: the agents call OpenRouter
+
+# Pick a provider (either works — both are OpenAI-compatible):
+export LLM_PROVIDER=openrouter  OPENROUTER_API_KEY=sk-or-...
+#   ...or...
+export LLM_PROVIDER=deepseek    DEEPSEEK_API_KEY=sk-...
+
 export PHANTOM_INTERNAL_SECRET=changeme      # optional: protects write endpoints
 uvicorn main:app --host 0.0.0.0 --port 8500
 ```
 
-Then open `http://localhost:8500/bundle/ui`, or use the API directly (below).
+`GET /health` reports the active `llm_provider` and whether it's `llm_configured`.
+Per-tier models are overridable (e.g. `DEEPSEEK_PREMIUM_MODEL`,
+`OPENROUTER_FLEET_MODEL`). Then open `http://localhost:8500/bundle/ui`, or use
+the API directly (below).
 
 ## Example
 
