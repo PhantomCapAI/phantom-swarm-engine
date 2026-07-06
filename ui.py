@@ -69,6 +69,7 @@ BUNDLER_UI = """<!doctype html>
     </div>
   </div>
   <button id="go">Create Bundle</button>
+  <span id="price" style="margin-left:12px;color:#7d8590;font-size:13px;"></span>
 
   <div id="status"></div>
   <div id="feed"></div>
@@ -98,19 +99,64 @@ function addMsg(m) {
   window.scrollTo(0, document.body.scrollHeight);
 }
 
-async function run() {
+let PRICING = { enabled: false };
+
+// Detect return-from-Stripe (?paid=<checkout_session_id>).
+function paidParam() {
+  return new URLSearchParams(location.search).get('paid');
+}
+
+async function loadPricing() {
+  try {
+    PRICING = await (await fetch('/bundle/pricing')).json();
+  } catch (e) { PRICING = { enabled: false }; }
+  if (PRICING.enabled) {
+    $('price').textContent = 'Price: ' + PRICING.price + ' ' + (PRICING.currency || 'usd').toUpperCase();
+    $('go').textContent = 'Pay ' + PRICING.price + ' ' + (PRICING.currency || 'usd').toUpperCase() + ' & Create';
+  }
+}
+
+// Entry point: decides between paying (Stripe) and creating directly.
+async function start() {
   const spec = $('spec').value.trim();
   if (!spec) { $('status').innerHTML = '<span class="err">Enter a spec.</span>'; return; }
+
+  const paid = paidParam();
+  const hasSecret = $('secret').value.trim().length > 0;
+
+  // Paywall on, not yet paid, no admin secret -> send to Stripe Checkout.
+  if (PRICING.enabled && !paid && !hasSecret) {
+    $('go').disabled = true;
+    $('status').textContent = 'Creating secure checkout…';
+    try {
+      const r = await fetch('/bundle/checkout', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok || !d.url) throw new Error(d.error || 'checkout failed');
+      localStorage.setItem('phantom_spec', spec);   // survive the redirect
+      location.href = d.url;
+    } catch (e) {
+      $('status').innerHTML = '<span class="err">' + e + '</span>';
+      $('go').disabled = false;
+    }
+    return;
+  }
+
+  run(spec, paid);
+}
+
+async function run(spec, paid) {
   $('go').disabled = true;
   $('feed').innerHTML = ''; $('done').innerHTML = ''; seen.clear();
   $('status').textContent = 'Starting job…';
 
+  const headers = { 'Content-Type': 'application/json' };
+  if ($('secret').value) headers['X-Phantom-Internal'] = $('secret').value;
+  if (paid) headers['X-Payment-Session'] = paid;
+
   let res, data;
   try {
     res = await fetch('/bundle/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Phantom-Internal': $('secret').value },
-      body: JSON.stringify({ spec })
+      method: 'POST', headers, body: JSON.stringify({ spec })
     });
     data = await res.json();
   } catch (e) {
@@ -118,7 +164,8 @@ async function run() {
     $('go').disabled = false; return;
   }
   if (!res.ok) {
-    $('status').innerHTML = '<span class="err">' + (data.error || res.status) + '</span>';
+    const msg = res.status === 402 ? 'Payment required.' : (data.error || res.status);
+    $('status').innerHTML = '<span class="err">' + msg + '</span>';
     $('go').disabled = false; return;
   }
 
@@ -143,7 +190,21 @@ async function run() {
   };
   es.onerror = () => { es.close(); $('go').disabled = false; };
 }
-$('go').addEventListener('click', run);
+
+$('go').addEventListener('click', start);
+
+// On load: fetch pricing, and if we just came back from Stripe (?paid=...),
+// restore the spec and auto-run the (now paid) bundle.
+(async () => {
+  await loadPricing();
+  const paid = paidParam();
+  if (paid) {
+    const saved = localStorage.getItem('phantom_spec');
+    if (saved) $('spec').value = saved;
+    $('status').textContent = 'Payment received. Building…';
+    run($('spec').value.trim(), paid);
+  }
+})();
 </script>
 </body>
 </html>"""

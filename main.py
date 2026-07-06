@@ -19,6 +19,7 @@ from cron import run_daily_report, daily_report
 from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
 from ui import BUNDLER_UI
 import store
+import payments
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -315,11 +316,46 @@ async def swarm_status(session_id: str):
 # auth as the swarm. A bundle job runs the 5 agents in "bundler mode" to design,
 # critique, and optimize a bundle, then generates all files and packages a zip.
 # --------------------------------------------------------------------------- #
+@app.post("/bundle/checkout")
+async def bundle_checkout(request: Request):
+    """Create a Stripe Checkout Session to pay for a bundle (when payments on)."""
+    if not payments.enabled():
+        return JSONResponse(status_code=400, content={"error": "payments not enabled"})
+    base_url = str(request.base_url)
+    result = payments.create_checkout(base_url)
+    if result.get("error"):
+        return JSONResponse(status_code=502, content=result)
+    return result
+
+
+@app.get("/bundle/pricing")
+async def bundle_pricing():
+    """Pricing summary — lets a UI show the price and whether payment is required."""
+    return payments.pricing()
+
+
 @app.post("/bundle/create")
 async def bundle_create(request: Request):
-    """Start a bundling job from a natural-language or JSON spec."""
-    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
-        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+    """Start a bundling job from a natural-language or JSON spec.
+
+    Auth: when the Stripe gate is enabled, a paid session (or the internal
+    secret) is required. When it's disabled, the legacy internal-secret check
+    applies — so existing deployments behave exactly as before.
+    """
+    gate = await payments.check(request.headers)
+    if not gate["ok"]:
+        return JSONResponse(
+            status_code=402,
+            content={
+                "error": gate.get("reason", "payment required"),
+                "pricing": payments.pricing(),
+                "checkout": "/bundle/checkout",
+            },
+        )
+    if not payments.enabled():
+        # Legacy protection when no paywall is configured.
+        if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+            return JSONResponse(status_code=403, content={"error": "unauthorized"})
 
     body = await request.json()
     # Accept a plain string spec, a {"spec": "..."} field, or a structured object.

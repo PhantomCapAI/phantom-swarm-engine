@@ -61,3 +61,26 @@ curl -OJ http://localhost:8500/bundle/ab12cd34/download        # get the zip
 ```
 
 Adding a new output target is one function in `bundler.py` (`TARGET_BUILDERS`).
+
+## Paywall (optional, Stripe)
+
+Off by default. When enabled, `POST /bundle/create` requires a paid Stripe
+Checkout session (or the `X-Phantom-Internal` admin secret). This charges people
+to use **your hosted instance**; payments land in your own Stripe account.
+
+Flow: `POST /bundle/checkout` → pay on Stripe → redirect back with the session id
+→ `POST /bundle/create` with `X-Payment-Session: <id>` (verified `paid`, single-use).
+The web UI at `/bundle/ui` drives this automatically.
+
+Enable with environment variables:
+
+```bash
+BUNDLE_PAYMENTS_ENABLED=1
+STRIPE_SECRET_KEY=sk_live_...      # or sk_test_...
+BUNDLE_PRICE=100                   # price per bundle (default 100)
+STRIPE_CURRENCY=usd                # default usd
+PUBLIC_BASE_URL=https://your-host  # for Stripe success/cancel redirects
+```
+
+- `GET /bundle/pricing` — current price + whether payment is required
+- `POST /bundle/checkout` — create a Checkout Session, returns the pay URL
