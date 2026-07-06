@@ -62,25 +62,41 @@ curl -OJ http://localhost:8500/bundle/ab12cd34/download        # get the zip
 
 Adding a new output target is one function in `bundler.py` (`TARGET_BUILDERS`).
 
-## Paywall (optional, Stripe)
+## Paywall (optional)
 
-Off by default. When enabled, `POST /bundle/create` requires a paid Stripe
-Checkout session (or the `X-Phantom-Internal` admin secret). This charges people
-to use **your hosted instance**; payments land in your own Stripe account.
+Off by default. When enabled, `POST /bundle/create` requires payment (or the
+`X-Phantom-Internal` admin secret). This charges people to use **your hosted
+instance** — it does not touch users' own wallets/tokens or the bundles they
+generate. Two providers; crypto takes precedence if both are set.
+
+`GET /bundle/pricing` reports the active price/provider; the web UI at
+`/bundle/ui` drives the whole flow.
+
+### Crypto (Solana)
+
+The operator sets the receiving wallet via `CRYPTO_PAY_TO` (not hardcoded — a
+fork never silently pays someone else). Payment is a real on-chain transfer,
+verified against a Solana RPC before any work runs, single-use per signature.
+
+Flow: pay from your wallet → `POST /bundle/create` with `X-Payment-Tx: <signature>`.
+
+```bash
+CRYPTO_PAYMENTS_ENABLED=1
+CRYPTO_PAY_TO=<your-solana-wallet>   # you set this
+CRYPTO_PRICE=0.5
+CRYPTO_ASSET=SOL                     # or an SPL mint address
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+```
+
+### Stripe
 
 Flow: `POST /bundle/checkout` → pay on Stripe → redirect back with the session id
 → `POST /bundle/create` with `X-Payment-Session: <id>` (verified `paid`, single-use).
-The web UI at `/bundle/ui` drives this automatically.
-
-Enable with environment variables:
 
 ```bash
 BUNDLE_PAYMENTS_ENABLED=1
-STRIPE_SECRET_KEY=sk_live_...      # or sk_test_...
-BUNDLE_PRICE=100                   # price per bundle (default 100)
-STRIPE_CURRENCY=usd                # default usd
-PUBLIC_BASE_URL=https://your-host  # for Stripe success/cancel redirects
+STRIPE_SECRET_KEY=sk_live_...
+BUNDLE_PRICE=100
+STRIPE_CURRENCY=usd
+PUBLIC_BASE_URL=https://your-host    # for Stripe redirects
 ```
-
-- `GET /bundle/pricing` — current price + whether payment is required
-- `POST /bundle/checkout` — create a Checkout Session, returns the pay URL

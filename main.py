@@ -20,6 +20,20 @@ from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
 from ui import BUNDLER_UI
 import store
 import payments
+import crypto_payments
+
+
+def _active_gate():
+    """The active payment gate module, or None when no paywall is configured.
+
+    Crypto takes precedence over Stripe; both are off by default so the legacy
+    internal-secret protection applies when neither is enabled.
+    """
+    if crypto_payments.enabled():
+        return crypto_payments
+    if payments.enabled():
+        return payments
+    return None
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -330,29 +344,32 @@ async def bundle_checkout(request: Request):
 
 @app.get("/bundle/pricing")
 async def bundle_pricing():
-    """Pricing summary — lets a UI show the price and whether payment is required."""
-    return payments.pricing()
+    """Pricing summary for the active gate (crypto, Stripe, or disabled)."""
+    gate = _active_gate()
+    if gate is crypto_payments:
+        return crypto_payments.pricing()
+    if gate is payments:
+        return payments.pricing()
+    return {"enabled": False, "provider": None}
 
 
 @app.post("/bundle/create")
 async def bundle_create(request: Request):
     """Start a bundling job from a natural-language or JSON spec.
 
-    Auth: when the Stripe gate is enabled, a paid session (or the internal
-    secret) is required. When it's disabled, the legacy internal-secret check
-    applies — so existing deployments behave exactly as before.
+    Auth: when a paywall (crypto or Stripe) is enabled, a verified payment (or
+    the internal secret) is required. When none is configured, the legacy
+    internal-secret check applies — so existing deployments behave as before.
     """
-    gate = await payments.check(request.headers)
-    if not gate["ok"]:
-        return JSONResponse(
-            status_code=402,
-            content={
-                "error": gate.get("reason", "payment required"),
-                "pricing": payments.pricing(),
-                "checkout": "/bundle/checkout",
-            },
-        )
-    if not payments.enabled():
+    gate = _active_gate()
+    if gate is not None:
+        g = await gate.check(request.headers)
+        if not g["ok"]:
+            content = {"error": g.get("reason", "payment required"), "pricing": gate.pricing()}
+            if gate is payments:
+                content["checkout"] = "/bundle/checkout"
+            return JSONResponse(status_code=402, content=content)
+    else:
         # Legacy protection when no paywall is configured.
         if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
             return JSONResponse(status_code=403, content={"error": "unauthorized"})

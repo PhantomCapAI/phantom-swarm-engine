@@ -68,6 +68,14 @@ BUNDLER_UI = """<!doctype html>
       <input id="secret" type="password" placeholder="(leave blank if auth disabled)"/>
     </div>
   </div>
+  <div id="cryptobox" style="display:none; margin-top:14px; background:#12151a; border:1px solid #262c36; border-radius:8px; padding:12px;">
+    <div style="font-size:12px; color:#7d8590; text-transform:uppercase; letter-spacing:.5px;">Pay with crypto</div>
+    <div style="margin-top:6px;">Send <b id="c_amount"></b> to:</div>
+    <code id="c_wallet" style="display:block; margin:6px 0; padding:8px; background:#0b0d10; border-radius:6px; word-break:break-all; color:#7ECFB3;"></code>
+    <label for="txsig">Transaction signature</label>
+    <input id="txsig" placeholder="paste the tx signature after paying"/>
+  </div>
+
   <button id="go">Create Bundle</button>
   <span id="price" style="margin-left:12px;color:#7d8590;font-size:13px;"></span>
 
@@ -110,13 +118,22 @@ async function loadPricing() {
   try {
     PRICING = await (await fetch('/bundle/pricing')).json();
   } catch (e) { PRICING = { enabled: false }; }
-  if (PRICING.enabled) {
-    $('price').textContent = 'Price: ' + PRICING.price + ' ' + (PRICING.currency || 'usd').toUpperCase();
-    $('go').textContent = 'Pay ' + PRICING.price + ' ' + (PRICING.currency || 'usd').toUpperCase() + ' & Create';
+  if (!PRICING.enabled) return;
+
+  if (PRICING.provider === 'crypto') {
+    $('price').textContent = 'Price: ' + PRICING.price + ' ' + PRICING.asset + ' (' + PRICING.network + ')';
+    $('c_amount').textContent = PRICING.price + ' ' + PRICING.asset;
+    $('c_wallet').textContent = PRICING.pay_to;
+    $('cryptobox').style.display = 'block';
+    $('go').textContent = "I've Paid — Create";
+  } else {
+    const cur = (PRICING.currency || 'usd').toUpperCase();
+    $('price').textContent = 'Price: ' + PRICING.price + ' ' + cur;
+    $('go').textContent = 'Pay ' + PRICING.price + ' ' + cur + ' & Create';
   }
 }
 
-// Entry point: decides between paying (Stripe) and creating directly.
+// Entry point: decides between paying and creating directly.
 async function start() {
   const spec = $('spec').value.trim();
   if (!spec) { $('status').innerHTML = '<span class="err">Enter a spec.</span>'; return; }
@@ -124,34 +141,51 @@ async function start() {
   const paid = paidParam();
   const hasSecret = $('secret').value.trim().length > 0;
 
-  // Paywall on, not yet paid, no admin secret -> send to Stripe Checkout.
-  if (PRICING.enabled && !paid && !hasSecret) {
-    $('go').disabled = true;
-    $('status').textContent = 'Creating secure checkout…';
-    try {
-      const r = await fetch('/bundle/checkout', { method: 'POST' });
-      const d = await r.json();
-      if (!r.ok || !d.url) throw new Error(d.error || 'checkout failed');
-      localStorage.setItem('phantom_spec', spec);   // survive the redirect
-      location.href = d.url;
-    } catch (e) {
-      $('status').innerHTML = '<span class="err">' + e + '</span>';
-      $('go').disabled = false;
+  if (PRICING.enabled && !hasSecret) {
+    // Crypto: user pays from their own wallet, then pastes the tx signature.
+    if (PRICING.provider === 'crypto') {
+      const tx = $('txsig').value.trim();
+      if (!tx) {
+        $('status').innerHTML = '<span class="err">Send ' + PRICING.price + ' ' + PRICING.asset +
+          ' to the wallet above, then paste the transaction signature.</span>';
+        return;
+      }
+      run(spec, { tx });
+      return;
     }
+    // Stripe: redirect through Checkout unless we're already back with ?paid=.
+    if (!paid) {
+      $('go').disabled = true;
+      $('status').textContent = 'Creating secure checkout…';
+      try {
+        const r = await fetch('/bundle/checkout', { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || !d.url) throw new Error(d.error || 'checkout failed');
+        localStorage.setItem('phantom_spec', spec);   // survive the redirect
+        location.href = d.url;
+      } catch (e) {
+        $('status').innerHTML = '<span class="err">' + e + '</span>';
+        $('go').disabled = false;
+      }
+      return;
+    }
+    run(spec, { paid });
     return;
   }
 
-  run(spec, paid);
+  run(spec, {});
 }
 
-async function run(spec, paid) {
+async function run(spec, opts) {
+  opts = opts || {};
   $('go').disabled = true;
   $('feed').innerHTML = ''; $('done').innerHTML = ''; seen.clear();
   $('status').textContent = 'Starting job…';
 
   const headers = { 'Content-Type': 'application/json' };
   if ($('secret').value) headers['X-Phantom-Internal'] = $('secret').value;
-  if (paid) headers['X-Payment-Session'] = paid;
+  if (opts.paid) headers['X-Payment-Session'] = opts.paid;
+  if (opts.tx) headers['X-Payment-Tx'] = opts.tx;
 
   let res, data;
   try {
@@ -202,7 +236,7 @@ $('go').addEventListener('click', start);
     const saved = localStorage.getItem('phantom_spec');
     if (saved) $('spec').value = saved;
     $('status').textContent = 'Payment received. Building…';
-    run($('spec').value.trim(), paid);
+    run($('spec').value.trim(), { paid });
   }
 })();
 </script>
