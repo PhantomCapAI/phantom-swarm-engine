@@ -109,67 +109,35 @@ function addMsg(m) {
 
 let PRICING = { enabled: false };
 
-// Detect return-from-Stripe (?paid=<checkout_session_id>).
-function paidParam() {
-  return new URLSearchParams(location.search).get('paid');
-}
-
 async function loadPricing() {
   try {
     PRICING = await (await fetch('/bundle/pricing')).json();
   } catch (e) { PRICING = { enabled: false }; }
   if (!PRICING.enabled) return;
 
-  if (PRICING.provider === 'crypto') {
-    $('price').textContent = 'Price: ' + PRICING.price + ' ' + PRICING.asset + ' (' + PRICING.network + ')';
-    $('c_amount').textContent = PRICING.price + ' ' + PRICING.asset;
-    $('c_wallet').textContent = PRICING.pay_to;
-    $('cryptobox').style.display = 'block';
-    $('go').textContent = "I've Paid — Create";
-  } else {
-    const cur = (PRICING.currency || 'usd').toUpperCase();
-    $('price').textContent = 'Price: ' + PRICING.price + ' ' + cur;
-    $('go').textContent = 'Pay ' + PRICING.price + ' ' + cur + ' & Create';
-  }
+  $('price').textContent = 'Price: ' + PRICING.price + ' ' + PRICING.asset + ' (' + PRICING.network + ')';
+  $('c_amount').textContent = PRICING.price + ' ' + PRICING.asset;
+  $('c_wallet').textContent = PRICING.pay_to;
+  $('cryptobox').style.display = 'block';
+  $('go').textContent = "I've Paid — Create";
 }
 
-// Entry point: decides between paying and creating directly.
+// Entry point: pay with crypto (paste tx signature) or create directly.
 async function start() {
   const spec = $('spec').value.trim();
   if (!spec) { $('status').innerHTML = '<span class="err">Enter a spec.</span>'; return; }
 
-  const paid = paidParam();
   const hasSecret = $('secret').value.trim().length > 0;
 
+  // Paywall on, no admin secret: user pays from their wallet, pastes the tx sig.
   if (PRICING.enabled && !hasSecret) {
-    // Crypto: user pays from their own wallet, then pastes the tx signature.
-    if (PRICING.provider === 'crypto') {
-      const tx = $('txsig').value.trim();
-      if (!tx) {
-        $('status').innerHTML = '<span class="err">Send ' + PRICING.price + ' ' + PRICING.asset +
-          ' to the wallet above, then paste the transaction signature.</span>';
-        return;
-      }
-      run(spec, { tx });
+    const tx = $('txsig').value.trim();
+    if (!tx) {
+      $('status').innerHTML = '<span class="err">Send ' + PRICING.price + ' ' + PRICING.asset +
+        ' to the wallet above, then paste the transaction signature.</span>';
       return;
     }
-    // Stripe: redirect through Checkout unless we're already back with ?paid=.
-    if (!paid) {
-      $('go').disabled = true;
-      $('status').textContent = 'Creating secure checkout…';
-      try {
-        const r = await fetch('/bundle/checkout', { method: 'POST' });
-        const d = await r.json();
-        if (!r.ok || !d.url) throw new Error(d.error || 'checkout failed');
-        localStorage.setItem('phantom_spec', spec);   // survive the redirect
-        location.href = d.url;
-      } catch (e) {
-        $('status').innerHTML = '<span class="err">' + e + '</span>';
-        $('go').disabled = false;
-      }
-      return;
-    }
-    run(spec, { paid });
+    run(spec, { tx });
     return;
   }
 
@@ -184,7 +152,6 @@ async function run(spec, opts) {
 
   const headers = { 'Content-Type': 'application/json' };
   if ($('secret').value) headers['X-Phantom-Internal'] = $('secret').value;
-  if (opts.paid) headers['X-Payment-Session'] = opts.paid;
   if (opts.tx) headers['X-Payment-Tx'] = opts.tx;
 
   let res, data;
@@ -227,18 +194,9 @@ async function run(spec, opts) {
 
 $('go').addEventListener('click', start);
 
-// On load: fetch pricing, and if we just came back from Stripe (?paid=...),
-// restore the spec and auto-run the (now paid) bundle.
-(async () => {
-  await loadPricing();
-  const paid = paidParam();
-  if (paid) {
-    const saved = localStorage.getItem('phantom_spec');
-    if (saved) $('spec').value = saved;
-    $('status').textContent = 'Payment received. Building…';
-    run($('spec').value.trim(), { paid });
-  }
-})();
+// On load: fetch pricing so the UI shows the wallet + amount when the paywall
+// is on.
+loadPricing();
 </script>
 </body>
 </html>"""

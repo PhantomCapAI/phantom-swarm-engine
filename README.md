@@ -62,23 +62,19 @@ curl -OJ http://localhost:8500/bundle/ab12cd34/download        # get the zip
 
 Adding a new output target is one function in `bundler.py` (`TARGET_BUILDERS`).
 
-## Paywall (optional)
+## Paywall (optional, crypto)
 
-Off by default. When enabled, `POST /bundle/create` requires payment (or the
-`X-Phantom-Internal` admin secret). This charges people to use **your hosted
-instance** — it does not touch users' own wallets/tokens or the bundles they
-generate. Two providers; crypto takes precedence if both are set.
-
-`GET /bundle/pricing` reports the active price/provider; the web UI at
-`/bundle/ui` drives the whole flow.
-
-### Crypto (Solana)
+Off by default. When enabled, `POST /bundle/create` requires an on-chain payment
+(or the `X-Phantom-Internal` admin secret). This charges people to use **your
+hosted instance** — it does not touch users' own wallets/tokens or the bundles
+they generate. No KYC, no third party: just a wallet.
 
 The operator sets the receiving wallet via `CRYPTO_PAY_TO` (not hardcoded — a
-fork never silently pays someone else). Payment is a real on-chain transfer,
-verified against a Solana RPC before any work runs, single-use per signature.
+fork never silently pays someone else). Payment is a real Solana transfer,
+verified against an RPC before any work runs, single-use per signature.
 
 Flow: pay from your wallet → `POST /bundle/create` with `X-Payment-Tx: <signature>`.
+The web UI at `/bundle/ui` shows the wallet + amount and takes the signature.
 
 ```bash
 CRYPTO_PAYMENTS_ENABLED=1
@@ -88,15 +84,4 @@ CRYPTO_ASSET=SOL                     # or an SPL mint address
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 ```
 
-### Stripe
-
-Flow: `POST /bundle/checkout` → pay on Stripe → redirect back with the session id
-→ `POST /bundle/create` with `X-Payment-Session: <id>` (verified `paid`, single-use).
-
-```bash
-BUNDLE_PAYMENTS_ENABLED=1
-STRIPE_SECRET_KEY=sk_live_...
-BUNDLE_PRICE=100
-STRIPE_CURRENCY=usd
-PUBLIC_BASE_URL=https://your-host    # for Stripe redirects
-```
+- `GET /bundle/pricing` — current price + wallet, or `{"enabled": false}`

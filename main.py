@@ -19,20 +19,17 @@ from cron import run_daily_report, daily_report
 from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
 from ui import BUNDLER_UI
 import store
-import payments
 import crypto_payments
 
 
 def _active_gate():
-    """The active payment gate module, or None when no paywall is configured.
+    """The active payment gate (crypto), or None when no paywall is configured.
 
-    Crypto takes precedence over Stripe; both are off by default so the legacy
-    internal-secret protection applies when neither is enabled.
+    The paywall is off by default, so the legacy internal-secret protection
+    applies when it isn't enabled.
     """
     if crypto_payments.enabled():
         return crypto_payments
-    if payments.enabled():
-        return payments
     return None
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
@@ -330,26 +327,11 @@ async def swarm_status(session_id: str):
 # auth as the swarm. A bundle job runs the 5 agents in "bundler mode" to design,
 # critique, and optimize a bundle, then generates all files and packages a zip.
 # --------------------------------------------------------------------------- #
-@app.post("/bundle/checkout")
-async def bundle_checkout(request: Request):
-    """Create a Stripe Checkout Session to pay for a bundle (when payments on)."""
-    if not payments.enabled():
-        return JSONResponse(status_code=400, content={"error": "payments not enabled"})
-    base_url = str(request.base_url)
-    result = payments.create_checkout(base_url)
-    if result.get("error"):
-        return JSONResponse(status_code=502, content=result)
-    return result
-
-
 @app.get("/bundle/pricing")
 async def bundle_pricing():
-    """Pricing summary for the active gate (crypto, Stripe, or disabled)."""
-    gate = _active_gate()
-    if gate is crypto_payments:
+    """Pricing summary for the crypto gate (or disabled)."""
+    if crypto_payments.enabled():
         return crypto_payments.pricing()
-    if gate is payments:
-        return payments.pricing()
     return {"enabled": False, "provider": None}
 
 
@@ -357,18 +339,18 @@ async def bundle_pricing():
 async def bundle_create(request: Request):
     """Start a bundling job from a natural-language or JSON spec.
 
-    Auth: when a paywall (crypto or Stripe) is enabled, a verified payment (or
-    the internal secret) is required. When none is configured, the legacy
+    Auth: when the crypto paywall is enabled, a verified on-chain payment (or
+    the internal secret) is required. When it isn't configured, the legacy
     internal-secret check applies — so existing deployments behave as before.
     """
     gate = _active_gate()
     if gate is not None:
         g = await gate.check(request.headers)
         if not g["ok"]:
-            content = {"error": g.get("reason", "payment required"), "pricing": gate.pricing()}
-            if gate is payments:
-                content["checkout"] = "/bundle/checkout"
-            return JSONResponse(status_code=402, content=content)
+            return JSONResponse(
+                status_code=402,
+                content={"error": g.get("reason", "payment required"), "pricing": gate.pricing()},
+            )
     else:
         # Legacy protection when no paywall is configured.
         if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
