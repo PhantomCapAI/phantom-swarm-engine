@@ -16,6 +16,7 @@ from llm import agent_turn
 from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
 from cron import run_daily_report, daily_report
+from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -254,11 +255,13 @@ async def swarm_start(request: Request):
     return {"session_id": session_id, "status": "started"}
 
 
-@app.get("/swarm/stream/{session_id}")
-async def swarm_stream(request: Request, session_id: str):
-    session = sessions.get(session_id)
-    if not session:
-        return JSONResponse(status_code=404, content={"error": "session not found"})
+def _session_event_stream(request: Request, session: dict):
+    """Shared SSE generator: replay past messages, then stream new ones.
+
+    Used by both swarm deliberations and bundle jobs — they share the same
+    session shape (a ``messages`` list + an ``events`` asyncio.Queue closed by a
+    ``None`` sentinel).
+    """
 
     async def event_generator():
         # Send all existing messages first (for late joiners)
@@ -280,6 +283,14 @@ async def swarm_stream(request: Request, session_id: str):
     return EventSourceResponse(event_generator())
 
 
+@app.get("/swarm/stream/{session_id}")
+async def swarm_stream(request: Request, session_id: str):
+    session = sessions.get(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": "session not found"})
+    return _session_event_stream(request, session)
+
+
 @app.get("/swarm/status/{session_id}")
 async def swarm_status(session_id: str):
     session = sessions.get(session_id)
@@ -293,6 +304,127 @@ async def swarm_status(session_id: str):
         "message_count": len(session["messages"]),
         "current_round": session["current_round"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Automated AI Bundler endpoints
+#
+# Reuses the same in-memory session store, SSE streaming, and X-Phantom-Internal
+# auth as the swarm. A bundle job runs the 5 agents in "bundler mode" to design,
+# critique, and optimize a bundle, then generates all files and packages a zip.
+# --------------------------------------------------------------------------- #
+@app.post("/bundle/create")
+async def bundle_create(request: Request):
+    """Start a bundling job from a natural-language or JSON spec."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+
+    body = await request.json()
+    # Accept a plain string spec, a {"spec": "..."} field, or a structured object.
+    spec = body.get("spec", "")
+    if not spec and isinstance(body, dict):
+        # Allow the whole body to be the structured spec (minus control keys).
+        structured = {k: v for k, v in body.items() if k not in ("targets",)}
+        if structured:
+            spec = json.dumps(structured)
+
+    if not spec:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "spec required (natural-language string or structured JSON)"},
+        )
+    if not isinstance(spec, str):
+        spec = json.dumps(spec)
+
+    session_id = str(uuid.uuid4())[:8]
+    sessions[session_id] = {
+        "kind": "bundle",
+        "spec": spec,
+        "status": "started",
+        "messages": [],
+        "events": asyncio.Queue(),
+    }
+
+    # Run generation in the background; client watches via /bundle/stream.
+    asyncio.create_task(run_bundle(session_id, sessions))
+
+    return {
+        "session_id": session_id,
+        "status": "started",
+        "stream": f"/bundle/stream/{session_id}",
+        "download": f"/bundle/{session_id}/download",
+    }
+
+
+@app.get("/bundle/stream/{session_id}")
+async def bundle_stream(request: Request, session_id: str):
+    """SSE stream of a bundling job (deliberation + file generation)."""
+    session = sessions.get(session_id)
+    if not session or session.get("kind") != "bundle":
+        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+    return _session_event_stream(request, session)
+
+
+@app.get("/bundle/status/{session_id}")
+async def bundle_status(session_id: str):
+    """Current status + summary of a bundling job."""
+    session = sessions.get(session_id)
+    if not session or session.get("kind") != "bundle":
+        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+
+    bp = session.get("blueprint") or {}
+    return {
+        "session_id": session_id,
+        "status": session["status"],
+        "message_count": len(session["messages"]),
+        "name": bp.get("name"),
+        "version": bp.get("version"),
+        "file_count": len(session.get("files") or {}),
+        "files": sorted((session.get("files") or {}).keys()),
+        "targets": bp.get("targets"),
+        "error": session.get("error"),
+        "download": f"/bundle/{session_id}/download" if session["status"] == "completed" else None,
+    }
+
+
+@app.get("/bundle/{session_id}/download")
+async def bundle_download(session_id: str, format: str = "zip"):
+    """Download the generated bundle as a zip, or its manifest as JSON.
+
+    ``?format=manifest`` returns the raw { path: content } file map instead of
+    the binary zip — handy for clients that want to render files inline.
+    """
+    session = sessions.get(session_id)
+    if not session or session.get("kind") != "bundle":
+        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+    if session["status"] != "completed":
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"bundle not ready (status: {session['status']})"},
+        )
+
+    if format == "manifest":
+        return {
+            "blueprint": session.get("blueprint"),
+            "files": session.get("files"),
+        }
+
+    zip_bytes = session.get("bundle_zip")
+    if not zip_bytes:
+        return JSONResponse(status_code=500, content={"error": "bundle zip missing"})
+
+    slug = (session.get("blueprint") or {}).get("slug", "bundle")
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.zip"'},
+    )
+
+
+@app.get("/bundle/targets")
+async def bundle_targets():
+    """List supported output targets (for building UIs)."""
+    return {"targets": DEFAULT_TARGETS, "bundler_version": BUNDLER_VERSION}
 
 
 async def _run_deliberation(session_id: str):
