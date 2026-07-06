@@ -93,6 +93,14 @@ BUNDLER_UI = """<!doctype html>
   <div id="status"></div>
   <div id="feed"></div>
   <div id="done"></div>
+
+  <section id="recent" style="margin-top:32px;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <h2 style="font-size:14px; color:#7d8590; text-transform:uppercase; letter-spacing:.5px; margin:0;">Recent bundles</h2>
+      <button id="refresh" style="margin:0; padding:4px 10px; font-size:12px; background:#12151a; color:#7d8590; border:1px solid #262c36;">↻</button>
+    </div>
+    <div id="recentlist" style="margin-top:10px;"></div>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -200,6 +208,7 @@ async function run(spec, opts) {
       $('status').textContent = 'Bundle ready.';
       $('done').innerHTML = '<a href="/bundle/' + sid + '/download">⬇ Download ' + sid + '.zip</a>';
       $('go').disabled = false;
+      loadRecent();
     } else if (m.phase === 'error') {
       es.close();
       $('status').innerHTML = '<span class="err">Job failed.</span>';
@@ -209,11 +218,33 @@ async function run(spec, opts) {
   es.onerror = () => { es.close(); $('go').disabled = false; };
 }
 
-$('go').addEventListener('click', start);
+async function loadRecent() {
+  let data;
+  try {
+    data = await (await fetch('/bundle/list')).json();
+  } catch (e) { return; }
+  const bundles = (data && data.bundles) || [];
+  if (!bundles.length) {
+    $('recentlist').innerHTML = '<div style="color:#7d8590; font-size:13px;">No bundles yet.</div>';
+    return;
+  }
+  $('recentlist').innerHTML = bundles.map(b => {
+    const when = (b.saved_at || '').replace('T', ' ').slice(0, 16);
+    const name = (b.name || 'bundle');
+    return '<div style="display:flex; justify-content:space-between; align-items:center; ' +
+      'background:#12151a; border:1px solid #262c36; border-radius:6px; padding:8px 12px; margin-bottom:6px;">' +
+      '<div><b>' + name + '</b> <span style="color:#7d8590;">v' + (b.version || '?') +
+      ' · ' + (b.file_count || 0) + ' files · ' + when + '</span></div>' +
+      '<a href="/bundle/' + b.session_id + '/download" style="color:#7ECFB3;">⬇ zip</a></div>';
+  }).join('');
+}
 
-// On load: fetch pricing so the UI shows the wallet + amount when the paywall
-// is on.
+$('go').addEventListener('click', start);
+$('refresh').addEventListener('click', loadRecent);
+
+// On load: pricing (shows wallet/amount when paywall on) + recent bundles.
 loadPricing();
+loadRecent();
 </script>
 </body>
 </html>"""
