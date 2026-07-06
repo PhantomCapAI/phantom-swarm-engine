@@ -115,8 +115,11 @@ async function loadPricing() {
   } catch (e) { PRICING = { enabled: false }; }
   if (!PRICING.enabled) return;
 
-  $('price').textContent = 'Price: ' + PRICING.price + ' ' + PRICING.asset + ' (' + PRICING.network + ')';
-  $('c_amount').textContent = PRICING.price + ' ' + PRICING.asset;
+  const opts = (PRICING.options && PRICING.options.length)
+    ? PRICING.options : [{ price: PRICING.price, asset: PRICING.asset }];
+  const amounts = opts.map(o => o.price + ' ' + o.asset).join(' or ');
+  $('price').textContent = 'Price: ' + amounts + ' (' + PRICING.network + ')';
+  $('c_amount').textContent = amounts;
   $('c_wallet').textContent = PRICING.pay_to;
   $('cryptobox').style.display = 'block';
   $('go').textContent = "I've Paid — Create";
@@ -133,8 +136,8 @@ async function start() {
   if (PRICING.enabled && !hasSecret) {
     const tx = $('txsig').value.trim();
     if (!tx) {
-      $('status').innerHTML = '<span class="err">Send ' + PRICING.price + ' ' + PRICING.asset +
-        ' to the wallet above, then paste the transaction signature.</span>';
+      $('status').innerHTML = '<span class="err">Pay the amount shown to the wallet above, ' +
+        'then paste the transaction signature.</span>';
       return;
     }
     run(spec, { tx });

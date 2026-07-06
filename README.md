@@ -73,15 +73,20 @@ The operator sets the receiving wallet via `CRYPTO_PAY_TO` (not hardcoded — a
 fork never silently pays someone else). Payment is a real Solana transfer,
 verified against an RPC before any work runs, single-use per signature.
 
+**Multi-asset:** accept SOL and/or USDC (each with its own price) via
+`CRYPTO_ACCEPT`. The payer sends whichever they like; the server fetches the tx
+once and accepts it if it paid any accepted asset to your wallet.
+
 Flow: pay from your wallet → `POST /bundle/create` with `X-Payment-Tx: <signature>`.
-The web UI at `/bundle/ui` shows the wallet + amount and takes the signature.
+The web UI at `/bundle/ui` shows the wallet + accepted amounts and takes the signature.
 
 ```bash
 CRYPTO_PAYMENTS_ENABLED=1
-CRYPTO_PAY_TO=<your-solana-wallet>   # you set this
-CRYPTO_PRICE=0.5
-CRYPTO_ASSET=SOL                     # or an SPL mint address
+CRYPTO_PAY_TO=<your-solana-wallet>       # you set this
+CRYPTO_ACCEPT=SOL:0.5,USDC:75            # accept either; per-asset price
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+# custom SPL token: CRYPTO_ACCEPT="<MINT>:1000:6:MYTOKEN"
+# legacy single-asset still works: CRYPTO_ASSET=SOL / CRYPTO_PRICE=0.5
 ```
 
-- `GET /bundle/pricing` — current price + wallet, or `{"enabled": false}`
+- `GET /bundle/pricing` — accepted assets/prices + wallet, or `{"enabled": false}`
