@@ -44,6 +44,11 @@ DEFAULT_DEPLOYMENTS = ["docker", "zeabur"]
 # "langgraph" is registered and available on request; kept out of defaults so a
 # typical bundle stays lean.
 
+# Failover chains for the lead roles. If the primary agent is down (LLM error or
+# empty reply), the hive hands the job to the next capable teammate.
+ORCHESTRATOR_LEADERS = ["Phoebe", "Atlas", "Quill"]  # structured planning / JSON
+PROMPT_LEADERS = ["Claire", "Sable", "Mira"]          # prompt writing
+
 
 # --------------------------------------------------------------------------- #
 # Bundler agent personas
@@ -570,26 +575,99 @@ BLUEPRINT_SCHEMA_HINT = """Return ONLY a JSON object with this shape:
 }"""
 
 
-async def _design_blueprint(spec_text: str) -> dict:
-    """Phoebe: spec → structured blueprint (JSON)."""
+# --------------------------------------------------------------------------- #
+# Self-healing hive
+#
+# Any agent turn can fail (LLM error, timeout, empty reply). Instead of silently
+# dropping the agent, the hive detects the outage and has a healthy teammate
+# cover its focus — or recruits a reserve agent from the wider roster. Lead roles
+# (orchestration, prompt-writing) fail over down a chain of capable backups.
+#
+# A ``res`` dict threads through the pipeline to record what happened:
+#   {"down": set[str], "covered": list[{"down","by","recruited"}]}
+# --------------------------------------------------------------------------- #
+def new_resilience() -> dict:
+    return {"down": set(), "covered": []}
+
+
+async def _safe_turn(
+    name: str, prompt: str, max_tokens: int = 200, temperature: float = 0.8, premium: bool = False
+) -> tuple[bool, str]:
+    """Run one agent turn with health detection. Returns (ok, text_or_error)."""
+    try:
+        text = await agent_turn(
+            bundler_system(name),
+            [{"role": "user", "content": prompt}],
+            agent_name=name,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            model=PREMIUM_MODEL if premium else None,
+        )
+    except Exception as e:  # network/API failure => agent is down
+        return False, f"error: {str(e)[:120]}"
+    if not text or not text.strip():
+        return False, "empty response"
+    return True, text.strip()
+
+
+async def _resilient_json(prompt, leaders, emit, phase, res, max_tokens):
+    """Try each leader until one returns parseable JSON. Returns (data, leader)."""
+    for i, leader in enumerate(leaders):
+        ok, out = await _safe_turn(leader, prompt, max_tokens=max_tokens, temperature=0.5, premium=True)
+        if ok:
+            parsed = extract_json(out)
+            if parsed is not None:
+                return parsed, leader
+            reason = "unusable output"
+        else:
+            reason = out
+        res["down"].add(leader)
+        if i + 1 < len(leaders):
+            nxt = leaders[i + 1]
+            res["covered"].append({"down": leader, "by": nxt, "recruited": True})
+            await emit(nxt, f"{leader} is down ({reason}). {nxt} taking the lead.", phase, "tool_call")
+    return None, leaders[-1]
+
+
+async def _resilient_text(prompt, leaders, emit, phase, res, max_tokens):
+    """Try each leader until one returns non-empty text. Returns (text, leader)."""
+    for i, leader in enumerate(leaders):
+        ok, out = await _safe_turn(leader, prompt, max_tokens=max_tokens, temperature=0.7, premium=True)
+        if ok:
+            return out, leader
+        res["down"].add(leader)
+        if i + 1 < len(leaders):
+            nxt = leaders[i + 1]
+            res["covered"].append({"down": leader, "by": nxt, "recruited": True})
+            await emit(nxt, f"{leader} is down ({out}). {nxt} covering.", phase, "tool_call")
+    return "", leaders[-1]
+
+
+def _pick_backup(down_name: str, live_here: list, used: set, down: set) -> str | None:
+    """A peer to cover a down agent: prefer a healthy pod-mate, else a reserve."""
+    for n in live_here:  # a teammate already proven healthy this pod
+        if n != down_name and n not in down:
+            return n
+    for a in HIVE:  # recruit a reserve from the wider hive
+        nm = a["name"]
+        if nm != "Phoebe" and nm != down_name and nm not in used and nm not in down:
+            return nm
+    return None
+
+
+async def _design_blueprint(spec_text: str, emit, res: dict) -> dict:
+    """Spec → structured blueprint (JSON), with orchestrator failover."""
     prompt = (
         "Design an AI bundle blueprint from this specification.\n\n"
         f"SPEC:\n{spec_text}\n\n"
         f"{BLUEPRINT_SCHEMA_HINT}"
     )
-    raw = await agent_turn(
-        bundler_system("Phoebe"),
-        [{"role": "user", "content": prompt}],
-        agent_name="Phoebe",
-        max_tokens=1500,
-        temperature=0.6,
-        model=PREMIUM_MODEL,
-    )
-    return extract_json(raw) or {}
+    data, _ = await _resilient_json(prompt, ORCHESTRATOR_LEADERS, emit, "design", res, 1500)
+    return data or {}
 
 
-async def _refine_blueprint(spec_text: str, draft: dict, critiques: str) -> dict:
-    """Phoebe: merge agent critiques into the final blueprint (JSON)."""
+async def _refine_blueprint(spec_text: str, draft: dict, critiques: str, emit, res: dict) -> dict:
+    """Merge agent critiques into the final blueprint (JSON), with failover."""
     prompt = (
         "Refine this AI bundle blueprint using the agent critiques. Keep what "
         "works, fix what they flagged, fill any gaps.\n\n"
@@ -598,19 +676,12 @@ async def _refine_blueprint(spec_text: str, draft: dict, critiques: str) -> dict
         f"AGENT CRITIQUES:\n{critiques}\n\n"
         f"{BLUEPRINT_SCHEMA_HINT}"
     )
-    raw = await agent_turn(
-        bundler_system("Phoebe"),
-        [{"role": "user", "content": prompt}],
-        agent_name="Phoebe",
-        max_tokens=1800,
-        temperature=0.5,
-        model=PREMIUM_MODEL,
-    )
-    return extract_json(raw) or draft
+    data, _ = await _resilient_json(prompt, ORCHESTRATOR_LEADERS, emit, "refine", res, 1800)
+    return data or draft
 
 
-async def _optimize_system_prompt(bp: dict, spec_text: str) -> str:
-    """Claire: write the optimized main system prompt for the bundle."""
+async def _optimize_system_prompt(bp: dict, spec_text: str, emit, res: dict) -> str:
+    """Write the optimized main system prompt, with prompt-writer failover."""
     agents_desc = "; ".join(f"{a['name']} ({a['role']})" for a in bp["agents"])
     prompt = (
         f"Write the optimized main system prompt for this AI bundle.\n\n"
@@ -620,14 +691,90 @@ async def _optimize_system_prompt(bp: dict, spec_text: str) -> str:
         "tone, and constraints. No preamble, no markdown fences — output the "
         "prompt text directly."
     )
-    return await agent_turn(
-        bundler_system("Claire"),
-        [{"role": "user", "content": prompt}],
-        agent_name="Claire",
-        max_tokens=800,
-        temperature=0.7,
-        model=PREMIUM_MODEL,
-    )
+    text, _ = await _resilient_text(prompt, PROMPT_LEADERS, emit, "optimize", res, 800)
+    return text
+
+
+async def _hive_critiques(blueprint_view: str, emit, res: dict) -> list:
+    """Run the full hive's critiques, pod by pod, with per-agent failover.
+
+    If an agent is down, a healthy pod-mate covers its focus, or a reserve agent
+    is recruited from the wider hive ("tell another agent to add more"). Every
+    outage and hand-off is streamed and recorded in ``res``.
+    """
+    critiques: list[str] = []
+    used: set = set()
+
+    async def _one(name: str, covering_for: str | None = None):
+        focus = AGENT_MAP[name]["focus"]
+        if covering_for:
+            cf = AGENT_MAP[covering_for]["focus"]
+            prompt = (
+                f"Draft bundle blueprint:\n{blueprint_view}\n\n"
+                f"Teammate {covering_for} is offline. As {name}, ALSO cover their focus "
+                f"({cf}) on top of your own ({focus}). One or two sharp, specific "
+                f"improvements. 3-4 sentences."
+            )
+            return await _safe_turn(name, prompt, max_tokens=280)
+        prompt = (
+            f"Draft bundle blueprint:\n{blueprint_view}\n\n"
+            f"Give your critique as {name} (focus: {focus}). One sharp, specific "
+            f"improvement. 2-3 sentences."
+        )
+        return await _safe_turn(name, prompt)
+
+    for pod in POD_ORDER:
+        names = HIVE_PODS.get(pod, [])
+        if not names:
+            continue
+        await emit("Phoebe", f"Pod: {pod} ({len(names)} agents)", "critique", "tool_call")
+
+        # First pass: whole pod concurrently.
+        outcomes = await asyncio.gather(*[_one(n) for n in names])
+        live_here: list = []
+        for name, (ok, out) in zip(names, outcomes):
+            used.add(name)
+            if ok:
+                live_here.append(name)
+                await emit(name, out, "critique")
+                critiques.append(f"{name} ({AGENT_MAP[name]['role']}): {out}")
+            else:
+                res["down"].add(name)
+                await emit("Cipher", f"{name} is down ({out}). Requesting a backup.", "critique", "message")
+
+        # Failover: cover each down agent with a peer or a recruited reserve.
+        for dn in [n for n in names if n in res["down"]]:
+            backup = _pick_backup(dn, live_here, used, res["down"])
+            if not backup:
+                await emit(
+                    "Phoebe",
+                    f"No backup available for {dn}; focus '{AGENT_MAP[dn]['focus']}' left uncovered.",
+                    "critique",
+                    "message",
+                )
+                continue
+            used.add(backup)
+            recruited = backup not in names
+            await emit(
+                backup,
+                f"Covering for {dn} ({'recruited to the pod' if recruited else 'reassigned'}).",
+                "critique",
+                "tool_call",
+            )
+            ok, out = await _one(backup, covering_for=dn)
+            if ok:
+                res["covered"].append({"down": dn, "by": backup, "recruited": recruited})
+                await emit(backup, out, "critique")
+                critiques.append(f"{backup} covering {dn}: {out}")
+                if backup not in live_here:
+                    live_here.append(backup)
+            else:
+                res["down"].add(backup)
+                await emit("Cipher", f"Backup {backup} also down; {dn}'s focus uncovered.", "critique", "message")
+
+        await asyncio.sleep(0.5)
+
+    return critiques
 
 
 # --------------------------------------------------------------------------- #
@@ -644,6 +791,8 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     session = sessions[session_id]
     spec_text = session["spec"]
     msg_counter = 0
+    res = new_resilience()          # tracks downed agents + who covered them
+    session["resilience"] = res
 
     async def emit(agent_name: str, text: str, phase: str, msg_type: str = "message"):
         nonlocal msg_counter
@@ -667,7 +816,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         session["status"] = "designing"
         await emit("Phoebe", f"Designing bundle from spec: {spec_text[:120]}", "design", "decision")
 
-        draft = await _design_blueprint(spec_text)
+        draft = await _design_blueprint(spec_text, emit, res)
         draft_bp = normalize_blueprint(draft, spec_text)
         await emit(
             "Phoebe",
@@ -691,43 +840,19 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
             "critique",
             "decision",
         )
-        critiques = []
-
-        async def _critique(name: str) -> str:
-            crit_prompt = (
-                f"Draft bundle blueprint:\n{blueprint_view}\n\n"
-                f"Give your critique as {name} (focus: {AGENT_MAP[name]['focus']}). "
-                f"One sharp, specific improvement. 2-3 sentences."
-            )
-            crit = await agent_turn(
-                bundler_system(name),
-                [{"role": "user", "content": crit_prompt}],
-                agent_name=name,
-            )
-            await emit(name, crit, "critique")
-            return f"{name} ({AGENT_MAP[name]['role']}): {crit}"
-
-        for pod in POD_ORDER:
-            names = HIVE_PODS.get(pod, [])
-            if not names:
-                continue
-            await emit("Phoebe", f"Pod: {pod} ({len(names)} agents)", "critique", "tool_call")
-            pod_results = await asyncio.gather(
-                *[_critique(n) for n in names], return_exceptions=True
-            )
-            critiques.extend(r for r in pod_results if isinstance(r, str))
-            await asyncio.sleep(0.5)
+        # Self-healing: down agents are covered by peers or recruited reserves.
+        critiques = await _hive_critiques(blueprint_view, emit, res)
 
         # --- Phase 3: refine --------------------------------------------- #
         session["status"] = "refining"
         critiques_text = "\n".join(critiques)[:6000]  # bound hive output for the prompt
-        refined = await _refine_blueprint(spec_text, draft_bp, critiques_text)
+        refined = await _refine_blueprint(spec_text, draft_bp, critiques_text, emit, res)
         bp = normalize_blueprint(refined, spec_text)
         await emit("Phoebe", "Blueprint locked. Optimizing the main prompt.", "refine", "decision")
 
         # --- Phase 4: optimize prompt ------------------------------------ #
         if not bp["system_prompt"]:
-            bp["system_prompt"] = await _optimize_system_prompt(bp, spec_text)
+            bp["system_prompt"] = await _optimize_system_prompt(bp, spec_text, emit, res)
         await emit("Claire", "Main system prompt optimized.", "optimize", "tool_call")
 
         # --- Phase 5: generate files ------------------------------------- #
@@ -753,6 +878,17 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
             await emit("Wren", f"Persist warning: {str(e)[:100]}", "package", "message")
 
         session["status"] = "completed"
+
+        # Resilience summary — what the hive healed through.
+        if res["down"]:
+            await emit(
+                "Phoebe",
+                f"Hive resilience: {len(res['down'])} agent(s) went down "
+                f"({', '.join(sorted(res['down']))}); {len(res['covered'])} focus area(s) "
+                f"covered by peers/reserves.",
+                "package",
+                "decision",
+            )
 
         await emit(
             "Phoebe",

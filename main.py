@@ -373,6 +373,7 @@ async def bundle_status(session_id: str):
     session = sessions.get(session_id)
     if session and session.get("kind") == "bundle":
         bp = session.get("blueprint") or {}
+        res = session.get("resilience") or {}
         return {
             "session_id": session_id,
             "status": session["status"],
@@ -383,6 +384,10 @@ async def bundle_status(session_id: str):
             "files": sorted((session.get("files") or {}).keys()),
             "targets": bp.get("targets"),
             "error": session.get("error"),
+            "resilience": {
+                "down": sorted(res.get("down", [])),
+                "covered": res.get("covered", []),
+            },
             "download": f"/bundle/{session_id}/download" if session["status"] == "completed" else None,
         }
 
