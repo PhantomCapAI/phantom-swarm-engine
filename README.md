@@ -11,12 +11,18 @@ The engine does two things:
    drop-in package of prompts, skills, target configs, examples, and deploy
    helpers for Claude Code, Cursor, and generic runtimes.
 
-## The hive (20 agents)
+## The bundler crew
 
-5 core (Phoebe, Nova, Loom, Claire, Cipher) + 15 specialists (Atlas, Sable, Vex,
-Juno, Echo, Rune, Pax, Quill, Iris, Onyx, Lyra, Mira, Kai, Dax, Wren), grouped
-into pods: Architecture, Prompts & Content, Tooling & Integration, Quality &
-Safety, Growth & Adoption. Phoebe orchestrates.
+A purpose-built crew where **each agent owns exactly one stage** of the pipeline,
+in order: **Orchestrator** (leads) → Interpreter → Architect → Prompt Smith →
+Tooler → Target Mapper → Exemplar → Guardian → Scribe → Packager, plus
+single-focus reviewers (Critic, Namer, Optimizer, Integrator, Inspector,
+Evaluator, Observer, Standardizer, Promoter, Guide) that scale a "full" run out
+to 20. Grouped for the stream into: Interpret & Design, Build, Quality & Safety,
+Docs & Package.
+
+The original 5 Phantom agents (Nova, Loom, Claire, Cipher, Phoebe) remain for the
+`/swarm` endpoints.
 
 ## Endpoints
 
@@ -32,13 +38,19 @@ Safety, Growth & Adoption. Phoebe orchestrates.
 
 ### Modes
 
-`POST /bundle/create` accepts a `mode`:
+`POST /bundle/create` accepts a `mode` (and, in full mode, a crew size):
 
-- `"full"` (default) — the whole **20-agent hive** deliberates. Richest result.
-- `"lite"` — just the **original 5 agents** (Nova, Loom, Claire, Cipher, Phoebe).
-  Fewer LLM calls, so noticeably **faster and cheaper**.
+- `"lite"` — a **fixed set of 5 essential agents**. Fewest LLM calls; **fastest
+  and cheapest**.
+- `"full"` (default) — **you choose how many agents** via `"agents": N`
+  (5–20, default 20). The crew fills from its core stages outward, so a smaller
+  N still covers every pipeline step.
 
-Failover is mode-scoped: a "lite" bundle never silently pulls in specialists.
+```json
+{"spec": "...", "mode": "full", "agents": 10}
+```
+
+Failover is mode-scoped: a "lite" bundle never silently pulls in extra agents.
 
 ### Swarm (unchanged)
 - `POST /swarm/start` — start deliberation (requires `X-Phantom-Internal`)

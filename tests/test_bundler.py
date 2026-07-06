@@ -8,6 +8,7 @@ import json
 import unittest
 import zipfile
 
+import agents
 import bundler
 from llm import extract_json
 
@@ -104,21 +105,34 @@ class GenerateFilesTests(unittest.TestCase):
         self.assertEqual(len(zf.namelist()), len(self.files))
 
 
-class DeliberationPlanTests(unittest.TestCase):
-    def test_full_uses_whole_hive(self):
-        pods, reserve, orch, prompt = bundler.deliberation_plan("full")
-        agents = sum(len(a) for _, a in pods) + 1  # + Phoebe
-        self.assertEqual(agents, 20)
-        self.assertEqual(len(pods), 5)
-        self.assertEqual(orch[0], "Phoebe")
+class RosterTests(unittest.TestCase):
+    def test_full_default_is_whole_crew(self):
+        pods, reserve, orch, prompt, total = agents.roster("full")
+        self.assertEqual(total, agents.CREW_SIZE)   # 20
+        self.assertEqual(orch[0], "Orchestrator")
+        # Every critic maps to a known crew member with a single focus.
+        for _, names in pods:
+            for n in names:
+                self.assertIn(n, agents.CREW_MAP)
 
-    def test_lite_uses_original_five(self):
-        pods, reserve, orch, prompt = bundler.deliberation_plan("lite")
-        agents = sum(len(a) for _, a in pods) + 1
-        self.assertEqual(agents, 5)
-        self.assertEqual(len(pods), 1)
-        # Lite reserve must stay within the original core (no specialists pulled in).
-        self.assertEqual(set(reserve), set(bundler.CORE_CRITICS))
+    def test_full_custom_size_is_choosable(self):
+        _, _, _, _, total = agents.roster("full", size=8)
+        self.assertEqual(total, 8)
+
+    def test_full_size_is_clamped(self):
+        self.assertEqual(agents.roster("full", size=1)[4], 5)                 # floor
+        self.assertEqual(agents.roster("full", size=999)[4], agents.CREW_SIZE)  # ceil
+
+    def test_lite_is_fixed_small_set(self):
+        pods, reserve, orch, prompt, total = agents.roster("lite")
+        self.assertEqual(total, len(agents.LITE_CRITICS) + 1)
+        self.assertEqual(set(reserve), set(agents.LITE_CRITICS))
+
+    def test_single_focus_per_agent(self):
+        # Orderly rebuild: no two crew agents share a name; each has one focus.
+        names = [a["name"] for a in agents.CREW]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(a["focus"] for a in agents.CREW))
 
 
 class ExtractJsonTests(unittest.TestCase):

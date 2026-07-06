@@ -66,9 +66,13 @@ BUNDLER_UI = """<!doctype html>
     <div>
       <label for="mode">Mode</label>
       <select id="mode">
-        <option value="full">Full — 20-agent hive (richest)</option>
-        <option value="lite">Lite — original 5 agents (faster/cheaper)</option>
+        <option value="full">Full — choose crew size (richest)</option>
+        <option value="lite">Lite — 5 essential agents (faster/cheaper)</option>
       </select>
+    </div>
+    <div>
+      <label for="size">Agents (full mode)</label>
+      <input id="size" type="number" min="5" max="20" step="1" value="20"/>
     </div>
     <div>
       <label for="secret">X-Phantom-Internal secret</label>
@@ -164,10 +168,13 @@ async function run(spec, opts) {
   if ($('secret').value) headers['X-Phantom-Internal'] = $('secret').value;
   if (opts.tx) headers['X-Payment-Tx'] = opts.tx;
 
+  const payload = { spec, mode: $('mode').value };
+  if (payload.mode === 'full') payload.agents = parseInt($('size').value, 10) || 20;
+
   let res, data;
   try {
     res = await fetch('/bundle/create', {
-      method: 'POST', headers, body: JSON.stringify({ spec, mode: $('mode').value })
+      method: 'POST', headers, body: JSON.stringify(payload)
     });
     data = await res.json();
   } catch (e) {

@@ -31,7 +31,16 @@ from datetime import datetime, timezone
 
 import yaml
 
-from agents import AGENT_MAP, HIVE, HIVE_PODS, POD_ORDER
+from agents import (
+    AGENT_MAP,
+    CREW,
+    roster,
+    VALID_MODES,
+    ORCHESTRATOR,
+    PROMPTER,
+    PACKAGER,
+    SAFETY,
+)
 from llm import agent_turn, extract_json, PREMIUM_MODEL
 import store
 
@@ -44,33 +53,9 @@ DEFAULT_DEPLOYMENTS = ["docker", "zeabur"]
 # "langgraph" is registered and available on request; kept out of defaults so a
 # typical bundle stays lean.
 
-# Failover chains for the lead roles. If the primary agent is down (LLM error or
-# empty reply), the hive hands the job to the next capable teammate.
-ORCHESTRATOR_LEADERS = ["Phoebe", "Atlas", "Quill"]  # structured planning / JSON
-PROMPT_LEADERS = ["Claire", "Sable", "Mira"]          # prompt writing
-
-# Bundling can run in two modes:
-#   * "full" — the whole 20-agent hive deliberates (richest, slower/costlier)
-#   * "lite" — just the original 5 agents (faster, cheaper)
-# The four core critics (the original 5 minus orchestrator Phoebe):
-CORE_CRITICS = ["Nova", "Loom", "Claire", "Cipher"]
-VALID_MODES = ("full", "lite")
-
-
-def deliberation_plan(mode: str):
-    """Roster for a given mode.
-
-    Returns (pods, reserve, orchestrator_leaders, prompt_leaders) where ``pods``
-    is an ordered list of (pod_name, [agent_names]) and ``reserve`` is the pool a
-    downed agent may be replaced from. Lite mode stays within the original five,
-    so a "lite" bundle never silently pulls in specialists.
-    """
-    if mode == "lite":
-        pods = [("Core Five", list(CORE_CRITICS))]
-        return pods, list(CORE_CRITICS), ["Phoebe", "Loom"], ["Claire", "Nova"]
-    pods = [(p, HIVE_PODS[p]) for p in POD_ORDER]
-    reserve = [a["name"] for a in HIVE if a["name"] != "Phoebe"]
-    return pods, reserve, ORCHESTRATOR_LEADERS, PROMPT_LEADERS
+# Bundling runs in two modes (roster is built by agents.roster):
+#   * "full" — the crew deliberates; you choose how many agents via ``size``
+#   * "lite" — a fixed, essential subset (faster, cheaper)
 
 
 # --------------------------------------------------------------------------- #
@@ -82,13 +67,13 @@ def deliberation_plan(mode: str):
 # single entry in agents.py.
 # --------------------------------------------------------------------------- #
 BUNDLER_PREFIX = (
-    "BUNDLER MODE: You are part of a 20-agent hive mind packaging an AI system "
+    "BUNDLER MODE: You are part of a crew packaging an AI system "
     "(agent/swarm/workflow) as a drop-in bundle for other developers."
 )
 
 
 def bundler_system(name: str) -> str:
-    """Base persona + hive bundler focus for the given agent."""
+    """Persona + bundler focus for the given agent."""
     agent = AGENT_MAP[name]
     focus = agent.get("focus", "")
     return f"{agent['system']}\n\n{BUNDLER_PREFIX} Your focus: {focus}"
@@ -848,7 +833,7 @@ async def _hive_critiques(blueprint_view: str, emit, res: dict, pods: list, rese
     for pod, names in pods:
         if not names:
             continue
-        await emit("Phoebe", f"Pod: {pod} ({len(names)} agents)", "critique", "tool_call")
+        await emit(ORCHESTRATOR, f"Group: {pod} ({len(names)} agents)", "critique", "tool_call")
 
         # First pass: whole pod concurrently.
         outcomes = await asyncio.gather(*[_one(n) for n in names])
@@ -861,14 +846,14 @@ async def _hive_critiques(blueprint_view: str, emit, res: dict, pods: list, rese
                 critiques.append(f"{name} ({AGENT_MAP[name]['role']}): {out}")
             else:
                 res["down"].add(name)
-                await emit("Cipher", f"{name} is down ({out}). Requesting a backup.", "critique", "message")
+                await emit(SAFETY, f"{name} is down ({out}). Requesting a backup.", "critique", "message")
 
         # Failover: cover each down agent with a peer or a recruited reserve.
         for dn in [n for n in names if n in res["down"]]:
             backup = _pick_backup(dn, live_here, used, res["down"], reserve)
             if not backup:
                 await emit(
-                    "Phoebe",
+                    ORCHESTRATOR,
                     f"No backup available for {dn}; focus '{AGENT_MAP[dn]['focus']}' left uncovered.",
                     "critique",
                     "message",
@@ -891,7 +876,7 @@ async def _hive_critiques(blueprint_view: str, emit, res: dict, pods: list, rese
                     live_here.append(backup)
             else:
                 res["down"].add(backup)
-                await emit("Cipher", f"Backup {backup} also down; {dn}'s focus uncovered.", "critique", "message")
+                await emit(SAFETY, f"Backup {backup} also down; {dn}'s focus uncovered.", "critique", "message")
 
         await asyncio.sleep(0.5)
 
@@ -914,8 +899,8 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     mode = session.get("mode", "full")
     if mode not in VALID_MODES:
         mode = "full"
-    pods, reserve, orch_leaders, prompt_leaders = deliberation_plan(mode)
-    agent_count = sum(len(names) for _, names in pods) + 1  # + Phoebe
+    size = session.get("size")  # full mode: how many agents you want
+    pods, reserve, orch_leaders, prompt_leaders, agent_count = roster(mode, size)
     msg_counter = 0
     res = new_resilience()          # tracks downed agents + who covered them
     session["resilience"] = res
@@ -923,7 +908,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     async def emit(agent_name: str, text: str, phase: str, msg_type: str = "message"):
         nonlocal msg_counter
         msg_counter += 1
-        agent = AGENT_MAP.get(agent_name, AGENT_MAP["Phoebe"])
+        agent = AGENT_MAP.get(agent_name, AGENT_MAP[ORCHESTRATOR])
         msg = {
             "id": str(msg_counter),
             "agent": agent_name,
@@ -941,7 +926,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         # --- Phase 1: normalize / design --------------------------------- #
         session["status"] = "designing"
         await emit(
-            "Phoebe",
+            ORCHESTRATOR,
             f"[{mode} mode] Designing bundle from spec: {spec_text[:110]}",
             "design",
             "decision",
@@ -950,7 +935,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         draft = await _design_blueprint(spec_text, emit, res, orch_leaders)
         draft_bp = normalize_blueprint(draft, spec_text)
         await emit(
-            "Phoebe",
+            ORCHESTRATOR,
             f"Draft blueprint: {draft_bp['name']} — "
             f"{len(draft_bp['agents'])} agent(s), {len(draft_bp['skills'])} skill(s).",
             "design",
@@ -967,11 +952,11 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
             {k: draft_bp[k] for k in ("name", "description", "agents", "skills", "targets")}
         )[:2500]
         convene = (
-            f"Convening the hive — {agent_count} agents across {len(pods)} pods."
+            f"Convening the crew — {agent_count} agents across {len(pods)} groups."
             if mode == "full"
-            else f"Lite mode — the original {agent_count} agents deliberating."
+            else f"Lite mode — {agent_count} agents deliberating."
         )
-        await emit("Phoebe", convene, "critique", "decision")
+        await emit(ORCHESTRATOR, convene, "critique", "decision")
 
         # Self-healing: down agents are covered by peers or recruited reserves.
         critiques = await _hive_critiques(blueprint_view, emit, res, pods, reserve)
@@ -981,18 +966,18 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         critiques_text = "\n".join(critiques)[:6000]  # bound output for the prompt
         refined = await _refine_blueprint(spec_text, draft_bp, critiques_text, emit, res, orch_leaders)
         bp = normalize_blueprint(refined, spec_text)
-        await emit("Phoebe", "Blueprint locked. Optimizing the main prompt.", "refine", "decision")
+        await emit(ORCHESTRATOR, "Blueprint locked. Optimizing the main prompt.", "refine", "decision")
 
         # --- Phase 4: optimize prompt ------------------------------------ #
         if not bp["system_prompt"]:
             bp["system_prompt"] = await _optimize_system_prompt(bp, spec_text, emit, res, prompt_leaders)
-        await emit("Claire", "Main system prompt optimized.", "optimize", "tool_call")
+        await emit(PROMPTER, "Main system prompt optimized.", "optimize", "tool_call")
 
         # --- Phase 5: generate files ------------------------------------- #
         session["status"] = "generating"
         files = generate_files(bp)
         await emit(
-            "Loom",
+            PACKAGER,
             f"Generated {len(files)} files across targets: {', '.join(bp['targets'])}.",
             "generate",
             "tool_call",
@@ -1008,15 +993,15 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         try:
             store.save_bundle(session_id, bp, files, zip_bytes)
         except Exception as e:
-            await emit("Wren", f"Persist warning: {str(e)[:100]}", "package", "message")
+            await emit(PACKAGER, f"Persist warning: {str(e)[:100]}", "package", "message")
 
         session["status"] = "completed"
 
-        # Resilience summary — what the hive healed through.
+        # Resilience summary — what the crew healed through.
         if res["down"]:
             await emit(
-                "Phoebe",
-                f"Hive resilience: {len(res['down'])} agent(s) went down "
+                ORCHESTRATOR,
+                f"Crew resilience: {len(res['down'])} agent(s) went down "
                 f"({', '.join(sorted(res['down']))}); {len(res['covered'])} focus area(s) "
                 f"covered by peers/reserves.",
                 "package",
@@ -1024,7 +1009,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
             )
 
         await emit(
-            "Phoebe",
+            ORCHESTRATOR,
             f"Bundle '{bp['name']}' v{bp['version']} ready — {len(files)} files, "
             f"{len(zip_bytes)} bytes. Download at /bundle/{session_id}/download.",
             "package",
@@ -1034,6 +1019,6 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     except Exception as e:  # never leave a stream hanging
         session["status"] = "error"
         session["error"] = str(e)[:200]
-        await emit("Cipher", f"Bundling error: {str(e)[:150]}", "error", "message")
+        await emit(SAFETY, f"Bundling error: {str(e)[:150]}", "error", "message")
 
     await session["events"].put(None)  # close SSE stream

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
-from agents import AGENTS, AGENT_MAP
+from agents import AGENTS, AGENT_MAP, CREW
 from llm import agent_turn
 from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
@@ -77,7 +77,7 @@ async def health():
     return {
         "status": "alive",
         "engine": "phantom-swarm",
-        "hive_size": len(AGENT_MAP),
+        "crew_size": len(CREW),
         "llm_configured": bool(os.environ.get("OPENROUTER_API_KEY")),
     }
 
@@ -380,16 +380,24 @@ async def bundle_create(request: Request):
     if not isinstance(spec, str):
         spec = json.dumps(spec)
 
-    # "full" = 20-agent hive (default); "lite" = original 5 agents (faster/cheaper).
+    # "full" = choose how many agents (default = whole crew); "lite" = fixed small
+    # essential set (faster/cheaper).
     mode = str(body.get("mode", "full")).lower()
     if mode not in ("full", "lite"):
         mode = "full"
+    # Full mode only: how many agents you want. Accepts "agents" or "size".
+    size = body.get("agents", body.get("size"))
+    try:
+        size = int(size) if size is not None else None
+    except (TypeError, ValueError):
+        size = None
 
     session_id = str(uuid.uuid4())[:8]
     sessions[session_id] = {
         "kind": "bundle",
         "spec": spec,
         "mode": mode,
+        "size": size,
         "status": "started",
         "messages": [],
         "events": asyncio.Queue(),
@@ -402,6 +410,7 @@ async def bundle_create(request: Request):
         "session_id": session_id,
         "status": "started",
         "mode": mode,
+        "size": size,
         "stream": f"/bundle/stream/{session_id}",
         "download": f"/bundle/{session_id}/download",
     }
