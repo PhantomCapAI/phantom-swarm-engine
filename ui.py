@@ -24,7 +24,7 @@ BUNDLER_UI = """<!doctype html>
   .sub { color: #7d8590; font-size: 13px; margin-top: 4px; }
   main { max-width: 900px; margin: 0 auto; padding: 24px; }
   label { display: block; font-size: 12px; color: #7d8590; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .5px; }
-  textarea, input {
+  textarea, input, select {
     width: 100%; background: #12151a; border: 1px solid #262c36; color: #e6e6e6;
     border-radius: 8px; padding: 10px 12px; font: inherit;
   }
@@ -63,6 +63,13 @@ BUNDLER_UI = """<!doctype html>
   <label for="spec">Spec (natural language or JSON)</label>
   <textarea id="spec" placeholder="A 3-agent code-review swarm: a linter, a security auditor, and a summarizer. Targets: Claude Code and Cursor."></textarea>
   <div class="row">
+    <div>
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="full">Full — 20-agent hive (richest)</option>
+        <option value="lite">Lite — original 5 agents (faster/cheaper)</option>
+      </select>
+    </div>
     <div>
       <label for="secret">X-Phantom-Internal secret</label>
       <input id="secret" type="password" placeholder="(leave blank if auth disabled)"/>
@@ -160,7 +167,7 @@ async function run(spec, opts) {
   let res, data;
   try {
     res = await fetch('/bundle/create', {
-      method: 'POST', headers, body: JSON.stringify({ spec })
+      method: 'POST', headers, body: JSON.stringify({ spec, mode: $('mode').value })
     });
     data = await res.json();
   } catch (e) {

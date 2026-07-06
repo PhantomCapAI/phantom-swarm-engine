@@ -49,6 +49,29 @@ DEFAULT_DEPLOYMENTS = ["docker", "zeabur"]
 ORCHESTRATOR_LEADERS = ["Phoebe", "Atlas", "Quill"]  # structured planning / JSON
 PROMPT_LEADERS = ["Claire", "Sable", "Mira"]          # prompt writing
 
+# Bundling can run in two modes:
+#   * "full" — the whole 20-agent hive deliberates (richest, slower/costlier)
+#   * "lite" — just the original 5 agents (faster, cheaper)
+# The four core critics (the original 5 minus orchestrator Phoebe):
+CORE_CRITICS = ["Nova", "Loom", "Claire", "Cipher"]
+VALID_MODES = ("full", "lite")
+
+
+def deliberation_plan(mode: str):
+    """Roster for a given mode.
+
+    Returns (pods, reserve, orchestrator_leaders, prompt_leaders) where ``pods``
+    is an ordered list of (pod_name, [agent_names]) and ``reserve`` is the pool a
+    downed agent may be replaced from. Lite mode stays within the original five,
+    so a "lite" bundle never silently pulls in specialists.
+    """
+    if mode == "lite":
+        pods = [("Core Five", list(CORE_CRITICS))]
+        return pods, list(CORE_CRITICS), ["Phoebe", "Loom"], ["Claire", "Nova"]
+    pods = [(p, HIVE_PODS[p]) for p in POD_ORDER]
+    reserve = [a["name"] for a in HIVE if a["name"] != "Phoebe"]
+    return pods, reserve, ORCHESTRATOR_LEADERS, PROMPT_LEADERS
+
 
 # --------------------------------------------------------------------------- #
 # Bundler agent personas
@@ -643,30 +666,29 @@ async def _resilient_text(prompt, leaders, emit, phase, res, max_tokens):
     return "", leaders[-1]
 
 
-def _pick_backup(down_name: str, live_here: list, used: set, down: set) -> str | None:
+def _pick_backup(down_name: str, live_here: list, used: set, down: set, reserve: list) -> str | None:
     """A peer to cover a down agent: prefer a healthy pod-mate, else a reserve."""
     for n in live_here:  # a teammate already proven healthy this pod
         if n != down_name and n not in down:
             return n
-    for a in HIVE:  # recruit a reserve from the wider hive
-        nm = a["name"]
+    for nm in reserve:  # recruit from the allowed reserve pool (mode-scoped)
         if nm != "Phoebe" and nm != down_name and nm not in used and nm not in down:
             return nm
     return None
 
 
-async def _design_blueprint(spec_text: str, emit, res: dict) -> dict:
+async def _design_blueprint(spec_text: str, emit, res: dict, leaders: list) -> dict:
     """Spec → structured blueprint (JSON), with orchestrator failover."""
     prompt = (
         "Design an AI bundle blueprint from this specification.\n\n"
         f"SPEC:\n{spec_text}\n\n"
         f"{BLUEPRINT_SCHEMA_HINT}"
     )
-    data, _ = await _resilient_json(prompt, ORCHESTRATOR_LEADERS, emit, "design", res, 1500)
+    data, _ = await _resilient_json(prompt, leaders, emit, "design", res, 1500)
     return data or {}
 
 
-async def _refine_blueprint(spec_text: str, draft: dict, critiques: str, emit, res: dict) -> dict:
+async def _refine_blueprint(spec_text: str, draft: dict, critiques: str, emit, res: dict, leaders: list) -> dict:
     """Merge agent critiques into the final blueprint (JSON), with failover."""
     prompt = (
         "Refine this AI bundle blueprint using the agent critiques. Keep what "
@@ -676,11 +698,11 @@ async def _refine_blueprint(spec_text: str, draft: dict, critiques: str, emit, r
         f"AGENT CRITIQUES:\n{critiques}\n\n"
         f"{BLUEPRINT_SCHEMA_HINT}"
     )
-    data, _ = await _resilient_json(prompt, ORCHESTRATOR_LEADERS, emit, "refine", res, 1800)
+    data, _ = await _resilient_json(prompt, leaders, emit, "refine", res, 1800)
     return data or draft
 
 
-async def _optimize_system_prompt(bp: dict, spec_text: str, emit, res: dict) -> str:
+async def _optimize_system_prompt(bp: dict, spec_text: str, emit, res: dict, leaders: list) -> str:
     """Write the optimized main system prompt, with prompt-writer failover."""
     agents_desc = "; ".join(f"{a['name']} ({a['role']})" for a in bp["agents"])
     prompt = (
@@ -691,15 +713,15 @@ async def _optimize_system_prompt(bp: dict, spec_text: str, emit, res: dict) -> 
         "tone, and constraints. No preamble, no markdown fences — output the "
         "prompt text directly."
     )
-    text, _ = await _resilient_text(prompt, PROMPT_LEADERS, emit, "optimize", res, 800)
+    text, _ = await _resilient_text(prompt, leaders, emit, "optimize", res, 800)
     return text
 
 
-async def _hive_critiques(blueprint_view: str, emit, res: dict) -> list:
-    """Run the full hive's critiques, pod by pod, with per-agent failover.
+async def _hive_critiques(blueprint_view: str, emit, res: dict, pods: list, reserve: list) -> list:
+    """Run the deliberation's critiques, pod by pod, with per-agent failover.
 
     If an agent is down, a healthy pod-mate covers its focus, or a reserve agent
-    is recruited from the wider hive ("tell another agent to add more"). Every
+    is recruited from the allowed pool ("tell another agent to add more"). Every
     outage and hand-off is streamed and recorded in ``res``.
     """
     critiques: list[str] = []
@@ -723,8 +745,7 @@ async def _hive_critiques(blueprint_view: str, emit, res: dict) -> list:
         )
         return await _safe_turn(name, prompt)
 
-    for pod in POD_ORDER:
-        names = HIVE_PODS.get(pod, [])
+    for pod, names in pods:
         if not names:
             continue
         await emit("Phoebe", f"Pod: {pod} ({len(names)} agents)", "critique", "tool_call")
@@ -744,7 +765,7 @@ async def _hive_critiques(blueprint_view: str, emit, res: dict) -> list:
 
         # Failover: cover each down agent with a peer or a recruited reserve.
         for dn in [n for n in names if n in res["down"]]:
-            backup = _pick_backup(dn, live_here, used, res["down"])
+            backup = _pick_backup(dn, live_here, used, res["down"], reserve)
             if not backup:
                 await emit(
                     "Phoebe",
@@ -790,6 +811,11 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     """
     session = sessions[session_id]
     spec_text = session["spec"]
+    mode = session.get("mode", "full")
+    if mode not in VALID_MODES:
+        mode = "full"
+    pods, reserve, orch_leaders, prompt_leaders = deliberation_plan(mode)
+    agent_count = sum(len(names) for _, names in pods) + 1  # + Phoebe
     msg_counter = 0
     res = new_resilience()          # tracks downed agents + who covered them
     session["resilience"] = res
@@ -814,9 +840,14 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
     try:
         # --- Phase 1: normalize / design --------------------------------- #
         session["status"] = "designing"
-        await emit("Phoebe", f"Designing bundle from spec: {spec_text[:120]}", "design", "decision")
+        await emit(
+            "Phoebe",
+            f"[{mode} mode] Designing bundle from spec: {spec_text[:110]}",
+            "design",
+            "decision",
+        )
 
-        draft = await _design_blueprint(spec_text, emit, res)
+        draft = await _design_blueprint(spec_text, emit, res, orch_leaders)
         draft_bp = normalize_blueprint(draft, spec_text)
         await emit(
             "Phoebe",
@@ -827,32 +858,34 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         )
         await asyncio.sleep(1)
 
-        # --- Phase 2: deliberate (20-agent hive, pod by pod) ------------- #
-        # The whole hive critiques. Agents within a pod run concurrently (fast,
-        # lively stream); pods run in order so the deliberation reads coherently.
+        # --- Phase 2: deliberate (pod by pod, mode-scoped) --------------- #
+        # Agents within a pod critique concurrently (fast, lively stream); pods
+        # run in order so the deliberation reads coherently. "full" convenes the
+        # 20-agent hive; "lite" uses just the original five.
         session["status"] = "deliberating"
         blueprint_view = json.dumps(
             {k: draft_bp[k] for k in ("name", "description", "agents", "skills", "targets")}
         )[:2500]
-        await emit(
-            "Phoebe",
-            f"Convening the hive — {len(HIVE)} agents across {len(POD_ORDER)} pods.",
-            "critique",
-            "decision",
+        convene = (
+            f"Convening the hive — {agent_count} agents across {len(pods)} pods."
+            if mode == "full"
+            else f"Lite mode — the original {agent_count} agents deliberating."
         )
+        await emit("Phoebe", convene, "critique", "decision")
+
         # Self-healing: down agents are covered by peers or recruited reserves.
-        critiques = await _hive_critiques(blueprint_view, emit, res)
+        critiques = await _hive_critiques(blueprint_view, emit, res, pods, reserve)
 
         # --- Phase 3: refine --------------------------------------------- #
         session["status"] = "refining"
-        critiques_text = "\n".join(critiques)[:6000]  # bound hive output for the prompt
-        refined = await _refine_blueprint(spec_text, draft_bp, critiques_text, emit, res)
+        critiques_text = "\n".join(critiques)[:6000]  # bound output for the prompt
+        refined = await _refine_blueprint(spec_text, draft_bp, critiques_text, emit, res, orch_leaders)
         bp = normalize_blueprint(refined, spec_text)
         await emit("Phoebe", "Blueprint locked. Optimizing the main prompt.", "refine", "decision")
 
         # --- Phase 4: optimize prompt ------------------------------------ #
         if not bp["system_prompt"]:
-            bp["system_prompt"] = await _optimize_system_prompt(bp, spec_text, emit, res)
+            bp["system_prompt"] = await _optimize_system_prompt(bp, spec_text, emit, res, prompt_leaders)
         await emit("Claire", "Main system prompt optimized.", "optimize", "tool_call")
 
         # --- Phase 5: generate files ------------------------------------- #

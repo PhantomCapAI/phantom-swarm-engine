@@ -361,7 +361,7 @@ async def bundle_create(request: Request):
     spec = body.get("spec", "")
     if not spec and isinstance(body, dict):
         # Allow the whole body to be the structured spec (minus control keys).
-        structured = {k: v for k, v in body.items() if k not in ("targets",)}
+        structured = {k: v for k, v in body.items() if k not in ("targets", "mode")}
         if structured:
             spec = json.dumps(structured)
 
@@ -373,10 +373,16 @@ async def bundle_create(request: Request):
     if not isinstance(spec, str):
         spec = json.dumps(spec)
 
+    # "full" = 20-agent hive (default); "lite" = original 5 agents (faster/cheaper).
+    mode = str(body.get("mode", "full")).lower()
+    if mode not in ("full", "lite"):
+        mode = "full"
+
     session_id = str(uuid.uuid4())[:8]
     sessions[session_id] = {
         "kind": "bundle",
         "spec": spec,
+        "mode": mode,
         "status": "started",
         "messages": [],
         "events": asyncio.Queue(),
@@ -388,6 +394,7 @@ async def bundle_create(request: Request):
     return {
         "session_id": session_id,
         "status": "started",
+        "mode": mode,
         "stream": f"/bundle/stream/{session_id}",
         "download": f"/bundle/{session_id}/download",
     }
@@ -412,6 +419,7 @@ async def bundle_status(session_id: str):
         return {
             "session_id": session_id,
             "status": session["status"],
+            "mode": session.get("mode", "full"),
             "message_count": len(session["messages"]),
             "name": bp.get("name"),
             "version": bp.get("version"),
