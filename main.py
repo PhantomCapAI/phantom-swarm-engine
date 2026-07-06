@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
@@ -17,6 +17,8 @@ from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
 from cron import run_daily_report, daily_report
 from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
+from ui import BUNDLER_UI
+import store
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -367,24 +369,48 @@ async def bundle_stream(request: Request, session_id: str):
 
 @app.get("/bundle/status/{session_id}")
 async def bundle_status(session_id: str):
-    """Current status + summary of a bundling job."""
+    """Current status + summary of a bundling job (falls back to disk)."""
     session = sessions.get(session_id)
-    if not session or session.get("kind") != "bundle":
-        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+    if session and session.get("kind") == "bundle":
+        bp = session.get("blueprint") or {}
+        return {
+            "session_id": session_id,
+            "status": session["status"],
+            "message_count": len(session["messages"]),
+            "name": bp.get("name"),
+            "version": bp.get("version"),
+            "file_count": len(session.get("files") or {}),
+            "files": sorted((session.get("files") or {}).keys()),
+            "targets": bp.get("targets"),
+            "error": session.get("error"),
+            "download": f"/bundle/{session_id}/download" if session["status"] == "completed" else None,
+        }
 
-    bp = session.get("blueprint") or {}
-    return {
-        "session_id": session_id,
-        "status": session["status"],
-        "message_count": len(session["messages"]),
-        "name": bp.get("name"),
-        "version": bp.get("version"),
-        "file_count": len(session.get("files") or {}),
-        "files": sorted((session.get("files") or {}).keys()),
-        "targets": bp.get("targets"),
-        "error": session.get("error"),
-        "download": f"/bundle/{session_id}/download" if session["status"] == "completed" else None,
-    }
+    # Not in memory — check disk (persisted from a previous run/restart).
+    meta = store.load_meta(session_id)
+    if meta:
+        bp = meta.get("blueprint") or {}
+        return {
+            "session_id": session_id,
+            "status": "completed",
+            "message_count": 0,
+            "name": bp.get("name"),
+            "version": bp.get("version"),
+            "file_count": meta.get("file_count", 0),
+            "files": sorted((meta.get("files") or {}).keys()),
+            "targets": bp.get("targets"),
+            "error": None,
+            "download": f"/bundle/{session_id}/download",
+            "source": "disk",
+        }
+
+    return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+
+
+@app.get("/bundle/list")
+async def bundle_list():
+    """List all persisted bundles (newest first)."""
+    return {"bundles": store.list_bundles()}
 
 
 @app.get("/bundle/{session_id}/download")
@@ -392,28 +418,37 @@ async def bundle_download(session_id: str, format: str = "zip"):
     """Download the generated bundle as a zip, or its manifest as JSON.
 
     ``?format=manifest`` returns the raw { path: content } file map instead of
-    the binary zip — handy for clients that want to render files inline.
+    the binary zip. Falls back to disk if the live session has been reclaimed.
     """
     session = sessions.get(session_id)
-    if not session or session.get("kind") != "bundle":
-        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
-    if session["status"] != "completed":
+    in_memory = bool(session and session.get("kind") == "bundle")
+
+    if in_memory and session["status"] != "completed":
         return JSONResponse(
             status_code=409,
             content={"error": f"bundle not ready (status: {session['status']})"},
         )
 
-    if format == "manifest":
-        return {
-            "blueprint": session.get("blueprint"),
-            "files": session.get("files"),
-        }
+    # Resolve blueprint / files / zip from memory, else disk.
+    if in_memory and session["status"] == "completed":
+        blueprint = session.get("blueprint")
+        files = session.get("files")
+        zip_bytes = session.get("bundle_zip")
+    else:
+        meta = store.load_meta(session_id)
+        if not meta:
+            return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+        blueprint = meta.get("blueprint")
+        files = meta.get("files")
+        zip_bytes = store.load_zip(session_id)
 
-    zip_bytes = session.get("bundle_zip")
+    if format == "manifest":
+        return {"blueprint": blueprint, "files": files}
+
     if not zip_bytes:
         return JSONResponse(status_code=500, content={"error": "bundle zip missing"})
 
-    slug = (session.get("blueprint") or {}).get("slug", "bundle")
+    slug = (blueprint or {}).get("slug", "bundle")
     return Response(
         content=zip_bytes,
         media_type="application/zip",
@@ -424,7 +459,19 @@ async def bundle_download(session_id: str, format: str = "zip"):
 @app.get("/bundle/targets")
 async def bundle_targets():
     """List supported output targets (for building UIs)."""
-    return {"targets": DEFAULT_TARGETS, "bundler_version": BUNDLER_VERSION}
+    from bundler import TARGET_BUILDERS
+
+    return {
+        "targets": DEFAULT_TARGETS,
+        "available": sorted(TARGET_BUILDERS.keys()),
+        "bundler_version": BUNDLER_VERSION,
+    }
+
+
+@app.get("/bundle/ui", response_class=HTMLResponse)
+async def bundle_ui():
+    """Minimal web UI: submit a spec, watch the hive stream, download the zip."""
+    return HTMLResponse(content=BUNDLER_UI)
 
 
 async def _run_deliberation(session_id: str):
