@@ -1,3 +1,5 @@
+import envload  # noqa: F401  — loads .env before anything reads config
+
 import asyncio
 import json
 import os
@@ -7,15 +9,30 @@ from datetime import datetime, timezone
 import hashlib
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
-from agents import AGENTS, AGENT_MAP
-from llm import agent_turn
+from agents import AGENTS, AGENT_MAP, CREW
+from llm import agent_turn, provider_name, configured
 from art import generate_art, store_image, get_image
 from twitter import post_tweet, post_thread
 from cron import run_daily_report, daily_report
+from bundler import run_bundle, BUNDLER_VERSION, DEFAULT_TARGETS
+from ui import BUNDLER_UI
+import store
+import crypto_payments
+
+
+def _active_gate():
+    """The active payment gate (crypto), or None when no paywall is configured.
+
+    The paywall is off by default, so the legacy internal-secret protection
+    applies when it isn't enabled.
+    """
+    if crypto_payments.enabled():
+        return crypto_payments
+    return None
 
 app = FastAPI(title="phantom-swarm-engine", docs_url=None, redoc_url=None)
 
@@ -57,7 +74,15 @@ ROUNDS = 3
 
 @app.get("/health")
 async def health():
-    return {"status": "alive", "engine": "phantom-swarm"}
+    # Surface whether the agents can actually run: they need an OpenRouter key.
+    # Without it the deliberation produces empty turns, so make that visible.
+    return {
+        "status": "alive",
+        "engine": "phantom-swarm",
+        "crew_size": len(CREW),
+        "llm_provider": provider_name(),
+        "llm_configured": configured(),
+    }
 
 
 @app.post("/report")
@@ -254,11 +279,13 @@ async def swarm_start(request: Request):
     return {"session_id": session_id, "status": "started"}
 
 
-@app.get("/swarm/stream/{session_id}")
-async def swarm_stream(request: Request, session_id: str):
-    session = sessions.get(session_id)
-    if not session:
-        return JSONResponse(status_code=404, content={"error": "session not found"})
+def _session_event_stream(request: Request, session: dict):
+    """Shared SSE generator: replay past messages, then stream new ones.
+
+    Used by both swarm deliberations and bundle jobs — they share the same
+    session shape (a ``messages`` list + an ``events`` asyncio.Queue closed by a
+    ``None`` sentinel).
+    """
 
     async def event_generator():
         # Send all existing messages first (for late joiners)
@@ -280,6 +307,14 @@ async def swarm_stream(request: Request, session_id: str):
     return EventSourceResponse(event_generator())
 
 
+@app.get("/swarm/stream/{session_id}")
+async def swarm_stream(request: Request, session_id: str):
+    session = sessions.get(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": "session not found"})
+    return _session_event_stream(request, session)
+
+
 @app.get("/swarm/status/{session_id}")
 async def swarm_status(session_id: str):
     session = sessions.get(session_id)
@@ -293,6 +328,239 @@ async def swarm_status(session_id: str):
         "message_count": len(session["messages"]),
         "current_round": session["current_round"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Automated AI Bundler endpoints
+#
+# Reuses the same in-memory session store, SSE streaming, and X-Phantom-Internal
+# auth as the swarm. A bundle job runs the 5 agents in "bundler mode" to design,
+# critique, and optimize a bundle, then generates all files and packages a zip.
+# --------------------------------------------------------------------------- #
+@app.get("/bundle/pricing")
+async def bundle_pricing():
+    """Pricing summary for the crypto gate (or disabled)."""
+    if crypto_payments.enabled():
+        return crypto_payments.pricing()
+    return {"enabled": False, "provider": None}
+
+
+@app.post("/bundle/create")
+async def bundle_create(request: Request):
+    """Start a bundling job from a natural-language or JSON spec.
+
+    Auth: when the crypto paywall is enabled, a verified on-chain payment (or
+    the internal secret) is required. When it isn't configured, the legacy
+    internal-secret check applies — so existing deployments behave as before.
+    """
+    gate = _active_gate()
+    if gate is not None:
+        g = await gate.check(request.headers)
+        if not g["ok"]:
+            return JSONResponse(
+                status_code=402,
+                content={"error": g.get("reason", "payment required"), "pricing": gate.pricing()},
+            )
+    else:
+        # Legacy protection when no paywall is configured.
+        if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+            return JSONResponse(status_code=403, content={"error": "unauthorized"})
+
+    body = await request.json()
+    # Accept a plain string spec, a {"spec": "..."} field, or a structured object.
+    spec = body.get("spec", "")
+    if not spec and isinstance(body, dict):
+        # Allow the whole body to be the structured spec (minus control keys).
+        structured = {k: v for k, v in body.items() if k not in ("targets", "mode")}
+        if structured:
+            spec = json.dumps(structured)
+
+    if not spec:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "spec required (natural-language string or structured JSON)"},
+        )
+    if not isinstance(spec, str):
+        spec = json.dumps(spec)
+
+    # "full" = choose how many agents (default = whole crew); "lite" = fixed small
+    # essential set (faster/cheaper).
+    mode = str(body.get("mode", "full")).lower()
+    if mode not in ("full", "lite"):
+        mode = "full"
+    # Full mode only: how many agents you want. Accepts "agents" or "size".
+    size = body.get("agents", body.get("size"))
+    try:
+        size = int(size) if size is not None else None
+    except (TypeError, ValueError):
+        size = None
+
+    # Optional: force which output targets to generate (else the crew decides).
+    from bundler import TARGET_BUILDERS
+
+    targets = body.get("targets")
+    if isinstance(targets, list):
+        targets = [t for t in targets if t in TARGET_BUILDERS]
+    else:
+        targets = None
+
+    session_id = str(uuid.uuid4())[:8]
+    sessions[session_id] = {
+        "kind": "bundle",
+        "spec": spec,
+        "mode": mode,
+        "size": size,
+        "targets": targets,
+        "status": "started",
+        "messages": [],
+        "events": asyncio.Queue(),
+    }
+
+    # Run generation in the background; client watches via /bundle/stream.
+    asyncio.create_task(run_bundle(session_id, sessions))
+
+    return {
+        "session_id": session_id,
+        "status": "started",
+        "mode": mode,
+        "size": size,
+        "stream": f"/bundle/stream/{session_id}",
+        "download": f"/bundle/{session_id}/download",
+    }
+
+
+@app.get("/bundle/stream/{session_id}")
+async def bundle_stream(request: Request, session_id: str):
+    """SSE stream of a bundling job (deliberation + file generation)."""
+    session = sessions.get(session_id)
+    if not session or session.get("kind") != "bundle":
+        return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+    return _session_event_stream(request, session)
+
+
+@app.get("/bundle/status/{session_id}")
+async def bundle_status(session_id: str):
+    """Current status + summary of a bundling job (falls back to disk)."""
+    session = sessions.get(session_id)
+    if session and session.get("kind") == "bundle":
+        bp = session.get("blueprint") or {}
+        res = session.get("resilience") or {}
+        return {
+            "session_id": session_id,
+            "status": session["status"],
+            "mode": session.get("mode", "full"),
+            "message_count": len(session["messages"]),
+            "name": bp.get("name"),
+            "version": bp.get("version"),
+            "file_count": len(session.get("files") or {}),
+            "files": sorted((session.get("files") or {}).keys()),
+            "targets": bp.get("targets"),
+            "error": session.get("error"),
+            "resilience": {
+                "down": sorted(res.get("down", [])),
+                "covered": res.get("covered", []),
+            },
+            "download": f"/bundle/{session_id}/download" if session["status"] == "completed" else None,
+        }
+
+    # Not in memory — check disk (persisted from a previous run/restart).
+    meta = store.load_meta(session_id)
+    if meta:
+        bp = meta.get("blueprint") or {}
+        return {
+            "session_id": session_id,
+            "status": "completed",
+            "message_count": 0,
+            "name": bp.get("name"),
+            "version": bp.get("version"),
+            "file_count": meta.get("file_count", 0),
+            "files": sorted((meta.get("files") or {}).keys()),
+            "targets": bp.get("targets"),
+            "error": None,
+            "download": f"/bundle/{session_id}/download",
+            "source": "disk",
+        }
+
+    return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+
+
+@app.get("/bundle/list")
+async def bundle_list():
+    """List all persisted bundles (newest first)."""
+    return {"bundles": store.list_bundles()}
+
+
+@app.delete("/bundle/{session_id}")
+async def bundle_delete(session_id: str, request: Request):
+    """Delete a bundle (from disk and memory). Admin-only via internal secret."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+    in_mem = sessions.pop(session_id, None) is not None
+    on_disk = store.delete_bundle(session_id)
+    if not (in_mem or on_disk):
+        return JSONResponse(status_code=404, content={"error": "bundle not found"})
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.get("/bundle/{session_id}/download")
+async def bundle_download(session_id: str, format: str = "zip"):
+    """Download the generated bundle as a zip, or its manifest as JSON.
+
+    ``?format=manifest`` returns the raw { path: content } file map instead of
+    the binary zip. Falls back to disk if the live session has been reclaimed.
+    """
+    session = sessions.get(session_id)
+    in_memory = bool(session and session.get("kind") == "bundle")
+
+    if in_memory and session["status"] != "completed":
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"bundle not ready (status: {session['status']})"},
+        )
+
+    # Resolve blueprint / files / zip from memory, else disk.
+    if in_memory and session["status"] == "completed":
+        blueprint = session.get("blueprint")
+        files = session.get("files")
+        zip_bytes = session.get("bundle_zip")
+    else:
+        meta = store.load_meta(session_id)
+        if not meta:
+            return JSONResponse(status_code=404, content={"error": "bundle session not found"})
+        blueprint = meta.get("blueprint")
+        files = meta.get("files")
+        zip_bytes = store.load_zip(session_id)
+
+    if format == "manifest":
+        return {"blueprint": blueprint, "files": files}
+
+    if not zip_bytes:
+        return JSONResponse(status_code=500, content={"error": "bundle zip missing"})
+
+    slug = (blueprint or {}).get("slug", "bundle")
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.zip"'},
+    )
+
+
+@app.get("/bundle/targets")
+async def bundle_targets():
+    """List supported output targets (for building UIs)."""
+    from bundler import TARGET_BUILDERS
+
+    return {
+        "targets": DEFAULT_TARGETS,
+        "available": sorted(TARGET_BUILDERS.keys()),
+        "bundler_version": BUNDLER_VERSION,
+    }
+
+
+@app.get("/bundle/ui", response_class=HTMLResponse)
+async def bundle_ui():
+    """Minimal web UI: submit a spec, watch the hive stream, download the zip."""
+    return HTMLResponse(content=BUNDLER_UI)
 
 
 async def _run_deliberation(session_id: str):
