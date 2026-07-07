@@ -141,6 +141,14 @@ curl -X POST http://localhost:8500/bundle/create \
 
 Adding a new output target is one function in `bundler.py` (`TARGET_BUILDERS`).
 
+## License
+
+Source-available under the **Phantom Source-Available License v1.0** (see
+[`LICENSE`](LICENSE)). Free for personal, non-commercial, evaluation, academic,
+and non-profit use. **Commercial use requires a paid commercial license** —
+contact `licensing@phantomcapital.live`. Running a paid hosted instance (e.g.
+with the optional crypto paywall enabled) is a commercial use.
+
 ## Tests
 
 Pure-logic unit tests (no network / no LLM) covering blueprint normalization,
