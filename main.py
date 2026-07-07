@@ -3,6 +3,7 @@ import envload  # noqa: F401  — loads .env before anything reads config
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -61,6 +62,18 @@ scheduler.add_job(run_daily_report, "cron", hour=14, minute=0)  # 14:00 UTC = 9:
 async def startup_event():
     scheduler.start()
     print("[cron] Daily report scheduled for 9:00 AM EST (14:00 UTC)")
+    if not configured():
+        print("[warn] No LLM API key set — agents will return empty turns. "
+              "Set OPENROUTER_API_KEY or DEEPSEEK_API_KEY (see .env.example).")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Drain the scheduler so shutdown is clean.
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
 
 
 # In-memory session store
@@ -70,6 +83,45 @@ sessions: dict[str, dict] = {}
 scheduled_sessions: list[dict] = []
 
 ROUNDS = 3
+
+# --- Resource limits (env-tunable) ----------------------------------------- #
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "3600"))   # evict terminal sessions after this
+MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", "500"))                  # hard cap on retained sessions
+MAX_SPEC_CHARS = int(os.environ.get("MAX_SPEC_CHARS", "20000"))           # reject oversized specs
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))      # per-IP create limit (0 = off)
+
+_rate_hits: dict[str, list] = {}
+
+
+def _prune_sessions() -> None:
+    """Evict old/terminal sessions so memory stays bounded. Completed bundles
+    are persisted to disk, so their downloads still work after eviction."""
+    now = time.time()
+    for sid in list(sessions):
+        s = sessions[sid]
+        if s.get("status") in ("completed", "error") and now - s.get("created_at", now) > SESSION_TTL_SECONDS:
+            sessions.pop(sid, None)
+    if len(sessions) > MAX_SESSIONS:
+        terminal = sorted(
+            (kv for kv in sessions.items() if kv[1].get("status") in ("completed", "error")),
+            key=lambda kv: kv[1].get("created_at", 0.0),
+        )
+        for sid, _ in terminal[: len(sessions) - MAX_SESSIONS]:
+            sessions.pop(sid, None)
+
+
+def _rate_ok(ip: str) -> bool:
+    """Fixed-window per-IP limiter for create endpoints."""
+    if RATE_LIMIT_PER_MIN <= 0:
+        return True
+    now = time.time()
+    hits = [t for t in _rate_hits.get(ip, []) if now - t < 60.0]
+    if len(hits) >= RATE_LIMIT_PER_MIN:
+        _rate_hits[ip] = hits
+        return False
+    hits.append(now)
+    _rate_hits[ip] = hits
+    return True
 
 
 @app.get("/health")
@@ -268,6 +320,7 @@ async def swarm_start(request: Request):
         "topic": topic,
         "free_mode": free_mode,
         "status": "started",
+        "created_at": time.time(),
         "messages": [],
         "current_round": 0,
         "events": asyncio.Queue(),
@@ -366,6 +419,14 @@ async def bundle_create(request: Request):
         if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
             return JSONResponse(status_code=403, content={"error": "unauthorized"})
 
+    # Per-IP rate limit (admin callers with the internal secret are exempt).
+    is_admin = bool(PHANTOM_INTERNAL_SECRET) and request.headers.get("X-Phantom-Internal") == PHANTOM_INTERNAL_SECRET
+    if not is_admin:
+        client_ip = request.client.host if request.client else "unknown"
+        if not _rate_ok(client_ip):
+            return JSONResponse(status_code=429, content={"error": "rate limit exceeded, try again shortly"})
+
+    _prune_sessions()  # keep memory bounded
     body = await request.json()
     # Accept a plain string spec, a {"spec": "..."} field, or a structured object.
     spec = body.get("spec", "")
@@ -382,6 +443,11 @@ async def bundle_create(request: Request):
         )
     if not isinstance(spec, str):
         spec = json.dumps(spec)
+    if len(spec) > MAX_SPEC_CHARS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"spec too long ({len(spec)} chars; max {MAX_SPEC_CHARS})"},
+        )
 
     # "full" = choose how many agents (default = whole crew); "lite" = fixed small
     # essential set (faster/cheaper).
@@ -412,6 +478,7 @@ async def bundle_create(request: Request):
         "size": size,
         "targets": targets,
         "status": "started",
+        "created_at": time.time(),
         "messages": [],
         "events": asyncio.Queue(),
     }

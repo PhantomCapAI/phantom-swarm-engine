@@ -149,10 +149,19 @@ and non-profit use. **Commercial use requires a paid commercial license** —
 contact `licensing@phantomcapital.live`. Running a paid hosted instance (e.g.
 with the optional crypto paywall enabled) is a commercial use.
 
+## Production limits
+
+Tunable via env (defaults shown): `MAX_CONCURRENT_BUNDLES=4` (excess jobs queue),
+`RATE_LIMIT_PER_MIN=60` (per-IP create limit; admin secret exempt),
+`MAX_SPEC_CHARS=20000`, `SESSION_TTL_SECONDS=3600` + `MAX_SESSIONS=500`
+(finished in-memory sessions are evicted; their downloads still work from disk).
+
 ## Tests
 
-Pure-logic unit tests (no network / no LLM) covering blueprint normalization,
-file generation, both deliberation modes, and the payment gate:
+Unit tests (pure logic) + integration tests (drive the real ASGI app over HTTP)
+— no network / no LLM. Cover blueprint normalization, multi-target generation,
+both modes, the payment gate, the `.env` loader, and the full create → stream →
+download → delete flow with auth and rate limiting:
 
 ```bash
 python -m unittest discover -s tests

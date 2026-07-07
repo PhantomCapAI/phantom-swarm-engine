@@ -25,6 +25,7 @@ Adding a new output target is a single entry in ``TARGET_BUILDERS``.
 import asyncio
 import io
 import json
+import os
 import re
 import zipfile
 from datetime import datetime, timezone
@@ -45,6 +46,19 @@ from llm import agent_turn, extract_json
 import store
 
 BUNDLER_VERSION = "1.0.0"
+
+# Cap concurrent bundle jobs so a burst of requests can't exhaust the LLM rate
+# limit or memory. Excess jobs wait ("queued") for a slot. Lazily bound to the
+# running loop so it works under any ASGI server.
+_MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_BUNDLES", "4"))
+_semaphore = None
+
+
+def _get_semaphore():
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _semaphore
 
 # Targets we know how to emit. A client may request a subset; unknown targets
 # are ignored. Keep this in sync with TARGET_BUILDERS below.
@@ -940,6 +954,11 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         session["messages"].append(msg)
         await session["events"].put(msg)
 
+    # Wait for a concurrency slot; excess jobs show as "queued" until one frees.
+    sem = _get_semaphore()
+    if sem.locked():
+        session["status"] = "queued"
+    await sem.acquire()
     try:
         # --- Phase 1: normalize / design --------------------------------- #
         session["status"] = "designing"
@@ -1046,5 +1065,7 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         session["status"] = "error"
         session["error"] = str(e)[:200]
         await emit(SAFETY, f"Bundling error: {str(e)[:150]}", "error", "message")
+    finally:
+        sem.release()
 
     await session["events"].put(None)  # close SSE stream
