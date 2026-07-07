@@ -518,13 +518,16 @@ def load_config():
 
 
 def _endpoint():
-    # Prefer whatever key is present; DeepSeek if explicitly selected.
+    # Prefer whatever key is present; DeepSeek if explicitly selected. Base URLs
+    # are overridable (point at a local/self-hosted OpenAI-compatible server).
     provider = os.environ.get("LLM_PROVIDER", "").lower()
     ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
     or_key = os.environ.get("OPENROUTER_API_KEY", "")
     if provider == "deepseek" or (ds_key and not or_key):
-        return "https://api.deepseek.com/chat/completions", ds_key
-    return "https://openrouter.ai/api/v1/chat/completions", or_key
+        base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+        return base + "/chat/completions", ds_key
+    base = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+    return base + "/chat/completions", or_key
 
 
 def call_llm(model, system, user):

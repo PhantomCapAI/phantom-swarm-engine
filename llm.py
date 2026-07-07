@@ -19,7 +19,7 @@ import httpx
 # provider -> endpoint, key env var, and default premium/fleet models.
 PROVIDERS = {
     "openrouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions",
         "key_env": "OPENROUTER_API_KEY",
         "premium": os.getenv("OPENROUTER_PREMIUM_MODEL", "anthropic/claude-sonnet-4-6"),
         "fleet": os.getenv("OPENROUTER_FLEET_MODEL", "meta-llama/llama-3.3-70b-instruct"),
