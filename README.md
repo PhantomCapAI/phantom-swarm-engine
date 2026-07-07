@@ -32,6 +32,7 @@ The original 5 Phantom agents (Nova, Loom, Claire, Cipher, Phoebe) remain for th
 - `GET  /bundle/status/{session_id}` — status + file list
 - `GET  /bundle/{session_id}/download` — download zip (`?format=manifest` for JSON)
 - `GET  /bundle/list` — list persisted bundles
+- `DELETE /bundle/{session_id}` — delete a bundle (admin, `X-Phantom-Internal`)
 - `GET  /bundle/targets` — supported output targets
 - `GET  /bundle/pricing` — paywall price (or `{"enabled": false}`)
 - `GET  /bundle/ui` — minimal web UI

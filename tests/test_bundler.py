@@ -135,6 +135,32 @@ class RosterTests(unittest.TestCase):
         self.assertTrue(all(a["focus"] for a in agents.CREW))
 
 
+class StoreTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+        import importlib
+        os.environ["BUNDLE_STORE_DIR"] = tempfile.mkdtemp()
+        import store
+        importlib.reload(store)
+        self.store = store
+        self.bp = bundler.normalize_blueprint(SAMPLE_RAW, "spec")
+        self.files = bundler.generate_files(self.bp)
+
+    def test_save_load_delete_roundtrip(self):
+        self.store.save_bundle("sid1", self.bp, self.files, bundler.make_zip(self.bp, self.files))
+        self.assertIsNotNone(self.store.load_zip("sid1"))
+        self.assertEqual([b["session_id"] for b in self.store.list_bundles()], ["sid1"])
+        # delete removes zip + meta and drops it from the listing
+        self.assertTrue(self.store.delete_bundle("sid1"))
+        self.assertIsNone(self.store.load_zip("sid1"))
+        self.assertIsNone(self.store.load_meta("sid1"))
+        self.assertEqual(self.store.list_bundles(), [])
+
+    def test_delete_missing_is_false(self):
+        self.assertFalse(self.store.delete_bundle("nope"))
+
+
 class ExtractJsonTests(unittest.TestCase):
     def test_direct(self):
         self.assertEqual(extract_json('{"ok": true}'), {"ok": True})

@@ -68,6 +68,20 @@ def load_meta(session_id: str) -> dict | None:
     return None
 
 
+def delete_bundle(session_id: str) -> bool:
+    """Remove a persisted bundle's zip + metadata. Returns True if anything was
+    removed (best-effort; a partial/missing file never raises)."""
+    removed = False
+    for path in (_zip_path(session_id), _meta_path(session_id)):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                removed = True
+        except Exception:
+            pass
+    return removed
+
+
 def list_bundles() -> list[dict]:
     """Summaries of all persisted bundles, newest first."""
     _ensure()

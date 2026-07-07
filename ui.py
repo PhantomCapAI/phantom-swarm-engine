@@ -262,13 +262,32 @@ async function loadRecent() {
       ' · ' + (b.file_count || 0) + ' files · ' + when + '</span></div>' +
       '<div style="display:flex; gap:12px;">' +
       '<a href="#" data-view="' + b.session_id + '" data-name="' + name + '" style="color:#7B8CDE;">view</a>' +
-      '<a href="/bundle/' + b.session_id + '/download" style="color:#7ECFB3;">⬇ zip</a></div></div>';
+      '<a href="/bundle/' + b.session_id + '/download" style="color:#7ECFB3;">⬇ zip</a>' +
+      '<a href="#" data-del="' + b.session_id + '" style="color:#ff7b72;">🗑</a></div></div>';
   }).join('');
   document.querySelectorAll('#recentlist a[data-view]').forEach(a =>
     a.addEventListener('click', (e) => {
       e.preventDefault();
       openViewer(a.getAttribute('data-view'), a.getAttribute('data-name'));
     }));
+  document.querySelectorAll('#recentlist a[data-del]').forEach(a =>
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      deleteBundle(a.getAttribute('data-del'));
+    }));
+}
+
+async function deleteBundle(sid) {
+  if (!confirm('Delete bundle ' + sid + '? This cannot be undone.')) return;
+  const headers = {};
+  if ($('secret').value) headers['X-Phantom-Internal'] = $('secret').value;
+  let res;
+  try {
+    res = await fetch('/bundle/' + sid, { method: 'DELETE', headers });
+  } catch (e) { alert('Delete failed: ' + e); return; }
+  if (res.status === 403) { alert('Unauthorized — enter the admin secret to delete.'); return; }
+  if (!res.ok && res.status !== 404) { alert('Delete failed (' + res.status + ').'); return; }
+  loadRecent();
 }
 
 // Inline file viewer — fetches the manifest (path -> content) and renders a

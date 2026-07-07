@@ -490,6 +490,18 @@ async def bundle_list():
     return {"bundles": store.list_bundles()}
 
 
+@app.delete("/bundle/{session_id}")
+async def bundle_delete(session_id: str, request: Request):
+    """Delete a bundle (from disk and memory). Admin-only via internal secret."""
+    if PHANTOM_INTERNAL_SECRET and request.headers.get("X-Phantom-Internal") != PHANTOM_INTERNAL_SECRET:
+        return JSONResponse(status_code=403, content={"error": "unauthorized"})
+    in_mem = sessions.pop(session_id, None) is not None
+    on_disk = store.delete_bundle(session_id)
+    if not (in_mem or on_disk):
+        return JSONResponse(status_code=404, content={"error": "bundle not found"})
+    return {"deleted": True, "session_id": session_id}
+
+
 @app.get("/bundle/{session_id}/download")
 async def bundle_download(session_id: str, format: str = "zip"):
     """Download the generated bundle as a zip, or its manifest as JSON.
