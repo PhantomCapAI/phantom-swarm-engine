@@ -47,10 +47,12 @@ The original 5 Phantom agents (Nova, Loom, Claire, Cipher, Phoebe) remain for th
   N still covers every pipeline step.
 
 ```json
-{"spec": "...", "mode": "full", "agents": 10}
+{"spec": "...", "mode": "full", "agents": 10, "targets": ["claude-code", "cursor"]}
 ```
 
 Failover is mode-scoped: a "lite" bundle never silently pulls in extra agents.
+`targets` is optional — omit it to let the crew choose. The web UI has a target
+picker, browses past bundles, and views generated files inline (no unzip).
 
 ### Swarm (unchanged)
 - `POST /swarm/start` — start deliberation (requires `X-Phantom-Internal`)

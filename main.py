@@ -395,12 +395,22 @@ async def bundle_create(request: Request):
     except (TypeError, ValueError):
         size = None
 
+    # Optional: force which output targets to generate (else the crew decides).
+    from bundler import TARGET_BUILDERS
+
+    targets = body.get("targets")
+    if isinstance(targets, list):
+        targets = [t for t in targets if t in TARGET_BUILDERS]
+    else:
+        targets = None
+
     session_id = str(uuid.uuid4())[:8]
     sessions[session_id] = {
         "kind": "bundle",
         "spec": spec,
         "mode": mode,
         "size": size,
+        "targets": targets,
         "status": "started",
         "messages": [],
         "events": asyncio.Queue(),

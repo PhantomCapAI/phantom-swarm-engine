@@ -87,6 +87,15 @@ BUNDLER_UI = """<!doctype html>
     <input id="txsig" placeholder="paste the tx signature after paying"/>
   </div>
 
+  <label>Targets</label>
+  <div id="targets" style="display:flex; flex-wrap:wrap; gap:14px; font-size:13px;">
+    <label style="display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0; margin:0; color:#e6e6e6;"><input type="checkbox" value="claude-code" checked style="width:auto;"/> Claude Code</label>
+    <label style="display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0; margin:0; color:#e6e6e6;"><input type="checkbox" value="cursor" checked style="width:auto;"/> Cursor</label>
+    <label style="display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0; margin:0; color:#e6e6e6;"><input type="checkbox" value="windsurf" checked style="width:auto;"/> Windsurf</label>
+    <label style="display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0; margin:0; color:#e6e6e6;"><input type="checkbox" value="config" checked style="width:auto;"/> Config</label>
+    <label style="display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0; margin:0; color:#e6e6e6;"><input type="checkbox" value="langgraph" style="width:auto;"/> LangGraph</label>
+  </div>
+
   <button id="go">Create Bundle</button>
   <span id="price" style="margin-left:12px;color:#7d8590;font-size:13px;"></span>
 
@@ -100,6 +109,17 @@ BUNDLER_UI = """<!doctype html>
       <button id="refresh" style="margin:0; padding:4px 10px; font-size:12px; background:#12151a; color:#7d8590; border:1px solid #262c36;">↻</button>
     </div>
     <div id="recentlist" style="margin-top:10px;"></div>
+  </section>
+
+  <section id="viewer" style="display:none; margin-top:24px;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <h2 style="font-size:14px; color:#7d8590; text-transform:uppercase; letter-spacing:.5px; margin:0;">Files — <span id="viewer_name"></span></h2>
+      <button id="viewer_close" style="margin:0; padding:4px 10px; font-size:12px; background:#12151a; color:#7d8590; border:1px solid #262c36;">close</button>
+    </div>
+    <div style="display:flex; gap:12px; margin-top:10px;">
+      <div id="filetree" style="flex:0 0 260px; max-height:420px; overflow:auto; background:#12151a; border:1px solid #262c36; border-radius:8px; padding:8px;"></div>
+      <pre id="filebody" style="flex:1; max-height:420px; overflow:auto; background:#0b0d10; border:1px solid #262c36; border-radius:8px; padding:12px; margin:0; white-space:pre; font-size:12px;"></pre>
+    </div>
   </section>
 </main>
 <script>
@@ -178,6 +198,8 @@ async function run(spec, opts) {
 
   const payload = { spec, mode: $('mode').value };
   if (payload.mode === 'full') payload.agents = parseInt($('size').value, 10) || 20;
+  const targets = Array.from(document.querySelectorAll('#targets input:checked')).map(c => c.value);
+  if (targets.length) payload.targets = targets;
 
   let res, data;
   try {
@@ -206,7 +228,10 @@ async function run(spec, opts) {
     if (m.type === 'consensus' || m.phase === 'package') {
       es.close();
       $('status').textContent = 'Bundle ready.';
-      $('done').innerHTML = '<a href="/bundle/' + sid + '/download">⬇ Download ' + sid + '.zip</a>';
+      $('done').innerHTML = '<a href="/bundle/' + sid + '/download">⬇ Download ' + sid + '.zip</a>' +
+        ' <a href="#" id="viewnow" style="margin-left:14px; color:#7B8CDE; text-decoration:none;">view files</a>';
+      const vn = document.getElementById('viewnow');
+      if (vn) vn.addEventListener('click', (e) => { e.preventDefault(); openViewer(sid, ''); });
       $('go').disabled = false;
       loadRecent();
     } else if (m.phase === 'error') {
@@ -235,12 +260,48 @@ async function loadRecent() {
       'background:#12151a; border:1px solid #262c36; border-radius:6px; padding:8px 12px; margin-bottom:6px;">' +
       '<div><b>' + name + '</b> <span style="color:#7d8590;">v' + (b.version || '?') +
       ' · ' + (b.file_count || 0) + ' files · ' + when + '</span></div>' +
-      '<a href="/bundle/' + b.session_id + '/download" style="color:#7ECFB3;">⬇ zip</a></div>';
+      '<div style="display:flex; gap:12px;">' +
+      '<a href="#" data-view="' + b.session_id + '" data-name="' + name + '" style="color:#7B8CDE;">view</a>' +
+      '<a href="/bundle/' + b.session_id + '/download" style="color:#7ECFB3;">⬇ zip</a></div></div>';
   }).join('');
+  document.querySelectorAll('#recentlist a[data-view]').forEach(a =>
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      openViewer(a.getAttribute('data-view'), a.getAttribute('data-name'));
+    }));
+}
+
+// Inline file viewer — fetches the manifest (path -> content) and renders a
+// tree + content pane. No unzip needed.
+async function openViewer(sid, name) {
+  $('viewer').style.display = 'block';
+  $('viewer_name').textContent = name || sid;
+  $('filetree').innerHTML = 'Loading…';
+  $('filebody').textContent = '';
+  let data;
+  try {
+    data = await (await fetch('/bundle/' + sid + '/download?format=manifest')).json();
+  } catch (e) { $('filetree').textContent = 'Failed to load.'; return; }
+  const files = (data && data.files) || {};
+  const paths = Object.keys(files).sort();
+  $('filetree').innerHTML = paths.map(p =>
+    '<div class="fitem" data-path="' + encodeURIComponent(p) + '" ' +
+    'style="cursor:pointer; padding:3px 4px; border-radius:4px; font-size:12px; color:#c9d1d9; word-break:break-all;">' +
+    p + '</div>').join('');
+  $('viewer').scrollIntoView({ behavior: 'smooth' });
+  document.querySelectorAll('#filetree .fitem').forEach(el =>
+    el.addEventListener('click', () => {
+      const p = decodeURIComponent(el.getAttribute('data-path'));
+      $('filebody').textContent = files[p];
+      document.querySelectorAll('#filetree .fitem').forEach(x => x.style.background = 'transparent');
+      el.style.background = '#1c2230';
+    }));
+  if (paths.length) $('filetree').querySelector('.fitem').click();  // preview first
 }
 
 $('go').addEventListener('click', start);
 $('refresh').addEventListener('click', loadRecent);
+$('viewer_close').addEventListener('click', () => { $('viewer').style.display = 'none'; });
 
 // On load: pricing (shows wallet/amount when paywall on) + recent bundles.
 loadPricing();

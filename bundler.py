@@ -981,6 +981,14 @@ async def run_bundle(session_id: str, sessions: dict) -> None:
         critiques_text = "\n".join(critiques)[:6000]  # bound output for the prompt
         refined = await _refine_blueprint(spec_text, draft_bp, critiques_text, emit, res, orch_leaders)
         bp = normalize_blueprint(refined, spec_text)
+
+        # If the request forced specific targets, honor them (filtered to known).
+        forced = session.get("targets")
+        if forced:
+            chosen = [t for t in forced if t in TARGET_BUILDERS]
+            if chosen:
+                bp["targets"] = chosen
+
         await emit(ORCHESTRATOR, "Blueprint locked. Optimizing the main prompt.", "refine", "decision")
 
         # --- Phase 4: optimize prompt ------------------------------------ #
