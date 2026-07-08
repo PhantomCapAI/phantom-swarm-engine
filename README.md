@@ -141,6 +141,38 @@ curl -X POST http://localhost:8500/bundle/create \
 
 Adding a new output target is one function in `bundler.py` (`TARGET_BUILDERS`).
 
+## CLI
+
+A dedicated command-line client lives in [`cli/`](cli/) — `phantom-bundler` —
+for effortless local/offline and remote use. It wraps the `/bundle/*` API with a
+clean set of commands, rich streaming output, and a config file.
+
+```bash
+pip install phantom-bundler          # installs `phantom-bundle` (alias: `pbundle`)
+# from this repo:  pip install ./cli
+
+# Auto-detects a local engine on :8500/:8000, or point at a hosted one:
+phantom-bundle config set remote https://bundler.phantomcapital.live
+
+phantom-bundle create "A 3-agent code-review swarm" --mode full --agents 12
+phantom-bundle list
+phantom-bundle download <session_id> -o . --unzip
+phantom-bundle run ./code-review-swarm "review the diff in main.py"
+```
+
+| Command | Purpose |
+| --- | --- |
+| `create "<spec>"` | Start a bundle, follow the hive live, optionally download it |
+| `stream <id>` | Follow an in-flight bundle's SSE stream |
+| `status <id>` / `list` | Inspect one bundle / list persisted bundles |
+| `download <id>` | Fetch the zip (`--unzip` to extract) |
+| `targets` / `ui` / `health` | Show targets · open the web UI · check the engine |
+| `run <dir> "<task>"` | Run a generated bundle's `run.py` locally |
+
+Global flags work on every command: `--remote`, `--json` (machine-readable),
+`--payment-tx` (paywall), `--internal-secret` (admin). Full docs and examples in
+[`cli/README.md`](cli/README.md).
+
 ## License
 
 Source-available under the **Phantom Source-Available License v1.0** (see
