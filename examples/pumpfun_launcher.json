@@ -1,0 +1,7 @@
+{
+  "spec": "An autonomous pump.fun token launcher agent. Given a token name, symbol, description, and image, it: (1) uploads the image + metadata to IPFS, (2) creates the token on pump.fun via the PumpPortal Local Transaction API with a configurable dev buy, signing locally so keys never leave the machine, (3) optionally fires bundled opening buys across my own funded wallets, and (4) starts post-launch monitoring with take-profit, stop-loss, and a kill-switch. It must enforce hard risk limits (max SOL spend, max slippage, dry-run mode) before every on-chain action and refuse anything over budget. Target Claude Code and a generic config runtime.",
+  "mode": "full",
+  "agents": 10,
+  "tier": "standard",
+  "targets": ["claude-code", "config", "solana-launch"]
+}

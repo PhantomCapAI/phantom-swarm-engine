@@ -1,0 +1,7 @@
+{
+  "spec": "A multi-agent pump.fun launch crew with three roles. Planner: takes the launch brief (name, symbol, narrative, budget) and produces a launch plan — dev buy size, bundled opening buys across my own wallets, timing, slippage, and priority fee — all within risk limits. Executor: uploads metadata to IPFS, creates the token on pump.fun via the PumpPortal Local Transaction API signing locally, then fires the planned opening buys. Monitor: watches the token post-launch and triggers take-profit, stop-loss, or the kill-switch, executing exits via the executor's sell tool. The crew shares one set of risk controls and never exceeds the configured max SOL spend or slippage. Targets: Claude Code, LangGraph, and generic config.",
+  "mode": "full",
+  "agents": 14,
+  "tier": "premium",
+  "targets": ["claude-code", "langgraph", "config", "solana-launch"]
+}
