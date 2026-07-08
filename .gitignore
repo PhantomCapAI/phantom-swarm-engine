@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 .env
 bundle_store/
+
+# CLI packaging / build artifacts
+cli/build/
+cli/dist/
+cli/*.egg-info/
+*.egg-info/
+.eggs/
