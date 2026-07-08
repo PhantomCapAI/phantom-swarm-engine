@@ -144,7 +144,10 @@ def create(
         None, "--targets", "-t", help="Comma list: claude-code,cursor,windsurf,langgraph,config.",
     ),
     output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Download + unzip the finished bundle here.",
+        None, "--output", "-o", help="Download + unzip the finished bundle into this dir.",
+    ),
+    download: bool = typer.Option(
+        False, "--download", "-d", help="Download + unzip the finished bundle into the current dir.",
     ),
     follow: bool = typer.Option(True, "--follow/--no-follow", help="Stream the hive live."),
 ) -> None:
@@ -154,12 +157,15 @@ def create(
       phantom-bundle create "A 3-agent code-review swarm"
       phantom-bundle create "Tweet-writer with a witty voice" --mode lite
       phantom-bundle create "Research assistant" -a 12 -t claude-code,cursor -o ./out
+      phantom-bundle create "A planner+writer duo" --download        # grab the zip here
     """
     c = _get_ctx(ctx)
     mode = mode.lower()
     if mode not in ("lite", "full"):
         raise PhantomError("mode must be 'lite' or 'full'")
     target_list = _parse_targets(targets)
+    # --download is shorthand for "--output ." — resolve to a single dest dir.
+    dest = output if output is not None else (Path(".") if download else None)
 
     client = c.client()
     if not c.as_json:
@@ -167,7 +173,12 @@ def create(
         out.info(f"engine: {c.remote}  ·  mode: {mode}"
                  + (f"  ·  agents: {agents}" if agents else ""))
 
-    resp = client.create(spec, mode=mode, agents=agents, targets=target_list)
+    # A spinner while the create request is in flight — the hive is waking up.
+    if c.as_json:
+        resp = client.create(spec, mode=mode, agents=agents, targets=target_list)
+    else:
+        with out.spinner("summoning the hive…"):
+            resp = client.create(spec, mode=mode, agents=agents, targets=target_list)
     session_id = resp["session_id"]
 
     if c.as_json and not follow:
@@ -183,8 +194,8 @@ def create(
     # Fetch authoritative final status (stream close != disk-persist done).
     status = _safe_status(client, session_id) or {"session_id": session_id, "status": final_status}
 
-    if output is not None and status.get("status") == "completed":
-        _download_and_maybe_unzip(client, session_id, output, unzip=True, as_json=c.as_json)
+    if dest is not None and status.get("status") == "completed":
+        _download_and_maybe_unzip(client, session_id, dest, unzip=True, as_json=c.as_json)
 
     if c.as_json:
         # When following, events were NDJSON — keep the summary on one line too.
@@ -260,9 +271,12 @@ def download(
 ) -> None:
     """Download a finished bundle's zip (optionally extracting it)."""
     c = _get_ctx(ctx)
-    result = _download_and_maybe_unzip(c.client(), session_id, output, unzip=unzip, as_json=c.as_json)
     if c.as_json:
+        result = _download_and_maybe_unzip(c.client(), session_id, output, unzip=unzip, as_json=True)
         out.print_json(result)
+    else:
+        with out.spinner(f"fetching {session_id}…"):
+            result = _download_and_maybe_unzip(c.client(), session_id, output, unzip=unzip, as_json=False)
 
 
 # --------------------------------------------------------------------------- #

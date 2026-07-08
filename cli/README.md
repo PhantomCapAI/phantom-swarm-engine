@@ -31,6 +31,12 @@ This installs two equivalent commands: **`phantom-bundle`** and the short alias
 pip install ./cli          # or:  cd cli && pip install -e .
 ```
 
+Just the dependencies (no install):
+
+```bash
+pip install -r requirements-cli.txt
+```
+
 Requires Python 3.9+. Dependencies are deliberately minimal — `typer`, `httpx`,
 `rich`, `tomli-w` — and version-aligned with the engine's own `requirements.txt`.
 
@@ -88,7 +94,8 @@ phantom-bundle create "..." --no-follow --json
 | `--mode lite\|full` | `lite` = 5 essential agents (fast/cheap); `full` (default) = choose the crew size |
 | `--agents N` | Crew size in full mode (5–20) |
 | `--targets a,b,c` | `claude-code`, `cursor`, `windsurf`, `langgraph`, `config` (omit to let the crew decide) |
-| `--output DIR` | Download + unzip the finished bundle here |
+| `--output DIR` / `-o` | Download + unzip the finished bundle into `DIR` |
+| `--download` / `-d` | Download + unzip into the current directory (shorthand for `-o .`) |
 | `--follow/--no-follow` | Stream the hive live (default: follow) |
 
 ### `run`

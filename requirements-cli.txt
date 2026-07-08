@@ -1,0 +1,11 @@
+# Runtime dependencies for the phantom-bundler CLI (see cli/).
+# The canonical source is cli/pyproject.toml; this mirror is here for quick
+# installs and CI. Prefer:  pip install ./cli
+#
+#   pip install -r requirements-cli.txt
+#
+typer>=0.12,<1.0
+httpx>=0.27,<0.29
+rich>=13.7
+tomli-w>=1.0
+tomli>=2.0; python_version < "3.11"

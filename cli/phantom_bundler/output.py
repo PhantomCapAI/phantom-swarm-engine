@@ -7,8 +7,9 @@ errors) keeps styling consistent, and honors ``NO_COLOR`` / non-TTY pipes.
 
 from __future__ import annotations
 
+import contextlib
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from rich.console import Console
 from rich.panel import Panel
@@ -53,6 +54,16 @@ def banner() -> None:
 
 def rule(label: str = "") -> None:
     console.rule(Text(label, style="phantom.dim"), style="phantom.gold")
+
+
+@contextlib.contextmanager
+def spinner(message: str) -> Iterator[None]:
+    """A gold spinner for a blocking wait. No-ops on a non-TTY (pipes/CI)."""
+    if not console.is_terminal:
+        yield
+        return
+    with console.status(Text(message, style="phantom.gold"), spinner="dots"):
+        yield
 
 
 # --------------------------------------------------------------------------- #

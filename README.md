@@ -149,12 +149,12 @@ clean set of commands, rich streaming output, and a config file.
 
 ```bash
 pip install phantom-bundler          # installs `phantom-bundle` (alias: `pbundle`)
-# from this repo:  pip install ./cli
+# from this repo:  pip install ./cli   (deps only: pip install -r requirements-cli.txt)
 
 # Auto-detects a local engine on :8500/:8000, or point at a hosted one:
 phantom-bundle config set remote https://bundler.phantomcapital.live
 
-phantom-bundle create "A 3-agent code-review swarm" --mode full --agents 12
+phantom-bundle create "A 3-agent code-review swarm" --mode full --agents 12 --download
 phantom-bundle list
 phantom-bundle download <session_id> -o . --unzip
 phantom-bundle run ./code-review-swarm "review the diff in main.py"
