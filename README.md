@@ -11,6 +11,28 @@ The engine does two things:
    drop-in package of prompts, skills, target configs, examples, and deploy
    helpers for Claude Code, Cursor, and generic runtimes.
 
+## Safety & Responsibility
+
+The bundler can generate agents that **move real money on-chain** (see the
+pump.fun / Solana tooling below). The generated tools ship with defense-in-depth
+— `LAUNCH_DRY_RUN=1` is the default (nothing is submitted), plus hard spend and
+slippage caps and a kill-switch — but those are guardrails, **not a guarantee**.
+
+By running this engine or any bundle it produces, **you** are solely responsible
+for:
+
+- **Keys** — your Solana private keys (never commit them; the tools sign locally
+  and never transmit or log keys).
+- **RPC** — the endpoint you point at and its reliability/rate limits.
+- **Budget** — every lamport spent; set `MAX_SPEND_SOL` / `DAILY_SPEND_SOL`
+  conservatively and test with `LAUNCH_DRY_RUN=1` first.
+- **Compliance** — the legality of launching/trading tokens and any market
+  conduct (e.g. bundled buys use *your own* wallets and must not be used to fake
+  organic volume or harm other traders) in your jurisdiction.
+
+Nothing here is financial advice. Verify third-party endpoints (PumpPortal,
+IPFS) against their current docs before mainnet use.
+
 ## The bundler crew
 
 A purpose-built crew where **each agent owns exactly one stage** of the pipeline,
@@ -211,7 +233,24 @@ Global flags work on every command: `--remote`, `--json` (machine-readable),
 `--payment-tx` (paywall), `--internal-secret` (admin). Full docs and examples in
 [`cli/README.md`](cli/README.md).
 
-## Generating pump.fun agents
+## Getting Started with Pump.fun Agents
+
+**Quickstart** — generate a full autonomous launcher in one call. Recommended
+spec: [`examples/pumpfun_launcher.json`](examples/pumpfun_launcher.json).
+
+```bash
+curl -X POST http://localhost:8500/bundle/create \
+  -H "X-Phantom-Internal: $PHANTOM_INTERNAL_SECRET" \
+  -H "Content-Type: application/json" \
+  --data @examples/pumpfun_launcher.json
+# -> {"session_id": "ab12cd34", ...}. Then download the zip:
+curl -OJ http://localhost:8500/bundle/ab12cd34/download
+```
+
+> 🛟 **Safety first.** The generated tools default to **`LAUNCH_DRY_RUN=1`** — no
+> transaction is submitted until you explicitly turn it off — and enforce
+> `MAX_SPEND_SOL` / `MAX_SLIPPAGE_PCT` caps plus a kill-switch. Keep dry-run on
+> until you've reviewed the output. See [Safety & Responsibility](#safety--responsibility).
 
 When a spec is about **pump.fun / Solana token launches**, the bundler detects
 the domain and enriches the output with a `solana-launch` target: a suite of

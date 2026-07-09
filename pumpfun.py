@@ -290,7 +290,13 @@ def upload(
     timeout: float = 60.0,
 ) -> str:
     """Pin image + metadata and return the metadata URI."""
+    if not name or not symbol:
+        raise ValueError("upload requires name and symbol")
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"image not found: {image_path}")
     size = os.path.getsize(image_path)
+    if size == 0:
+        raise ValueError(f"image is empty: {image_path}")
     if size > MAX_IMAGE_BYTES:
         raise ValueError(f"image too large: {size} bytes (max {MAX_IMAGE_BYTES})")
 
@@ -303,11 +309,16 @@ def upload(
         "website": website,
         "showName": "true",
     }
-    with open(image_path, "rb") as fh:
-        files = {"file": (os.path.basename(image_path), fh, "image/png")}
-        resp = requests.post(PUMP_IPFS_URL, data=form, files=files, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        with open(image_path, "rb") as fh:
+            files = {"file": (os.path.basename(image_path), fh, "image/png")}
+            resp = requests.post(PUMP_IPFS_URL, data=form, files=files, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        raise RuntimeError(f"IPFS upload failed: {e}") from e
+    except ValueError as e:  # non-JSON response
+        raise RuntimeError(f"IPFS response was not JSON: {e}") from e
     uri = data.get("metadataUri") or data.get("metadata_uri")
     if not uri:
         raise RuntimeError(f"no metadataUri in IPFS response: {data}")
@@ -340,18 +351,37 @@ DEFAULT_PRIORITY_FEE = float(os.environ.get("DEFAULT_PRIORITY_FEE_SOL", "0.0005"
 POOL = os.environ.get("PUMP_POOL", "pump")
 
 
+class PumpPortalError(RuntimeError):
+    """A PumpPortal request or transaction submission failed."""
+
+
 def _build_local_tx(payload: dict, timeout: float = 30.0) -> bytes:
-    resp = requests.post(TRADE_LOCAL_URL, json=payload, timeout=timeout)
-    resp.raise_for_status()
+    """POST to the Local Transaction API and return the unsigned tx bytes.
+
+    Surfaces the response body on failure (PumpPortal returns a JSON error there)
+    so callers get an actionable message instead of a bare status code.
+    """
+    try:
+        resp = requests.post(TRADE_LOCAL_URL, json=payload, timeout=timeout)
+    except requests.RequestException as e:
+        raise PumpPortalError(f"PumpPortal request failed: {e}") from e
+    if resp.status_code != 200:
+        raise PumpPortalError(f"PumpPortal returned HTTP {resp.status_code}: {resp.text[:300]}")
+    if not resp.content:
+        raise PumpPortalError("PumpPortal returned an empty transaction body")
     return resp.content  # raw serialized (unsigned) transaction bytes
 
 
 def _sign_and_send(tx_bytes: bytes, signers: list) -> str:
     """Co-sign a PumpPortal transaction and submit it to the RPC. Returns the sig."""
-    unsigned = VersionedTransaction.from_bytes(tx_bytes)
-    signed = VersionedTransaction(unsigned.message, signers)
-    client = wallet.rpc()
-    result = client.send_raw_transaction(bytes(signed), opts=TxOpts(preflight_commitment=Confirmed))
+    try:
+        unsigned = VersionedTransaction.from_bytes(tx_bytes)
+        signed = VersionedTransaction(unsigned.message, signers)
+        result = wallet.rpc().send_raw_transaction(
+            bytes(signed), opts=TxOpts(preflight_commitment=Confirmed)
+        )
+    except Exception as e:
+        raise PumpPortalError(f"signing/submit failed: {e}") from e
     return str(result.value)
 
 
@@ -364,6 +394,8 @@ def create_token(
     priority_fee_sol: float = DEFAULT_PRIORITY_FEE,
 ) -> dict:
     """Create a new pump.fun token, optionally with a dev buy. Returns {mint, signature}."""
+    if not name or not symbol or not uri:
+        raise ValueError("create_token requires name, symbol, and a metadata uri")
     risk_controls.preflight("create", dev_buy_sol, slippage_pct)
     dev = wallet.load_keypair()
     mint = Keypair()  # the new token's mint address
@@ -390,6 +422,10 @@ def create_token(
 def buy(mint: str, amount_sol: float, slippage_pct: float = DEFAULT_SLIPPAGE,
         priority_fee_sol: float = DEFAULT_PRIORITY_FEE) -> dict:
     """Buy `amount_sol` worth of `mint`. Returns {signature}."""
+    if not mint:
+        raise ValueError("buy requires a mint address")
+    if amount_sol <= 0:
+        raise ValueError("buy amount_sol must be positive")
     risk_controls.preflight("buy", amount_sol, slippage_pct)
     signer = wallet.load_keypair()
     payload = {
@@ -411,6 +447,10 @@ def buy(mint: str, amount_sol: float, slippage_pct: float = DEFAULT_SLIPPAGE,
 def sell(mint: str, percent: float = 100.0, slippage_pct: float = DEFAULT_SLIPPAGE,
          priority_fee_sol: float = DEFAULT_PRIORITY_FEE) -> dict:
     """Sell `percent` of the held `mint` (amount is a token %, denominatedInSol=false)."""
+    if not mint:
+        raise ValueError("sell requires a mint address")
+    if not 0 < percent <= 100:
+        raise ValueError("sell percent must be in (0, 100]")
     risk_controls.preflight("sell", 0.0, slippage_pct)  # selling doesn't spend SOL principal
     signer = wallet.load_keypair()
     payload = {
@@ -505,7 +545,12 @@ def execute_bundle(p: LaunchPlan, mint: str) -> list:
 _MONITOR_PY = '''"""Post-launch monitoring + automated risk exits.
 
 Polls a token's stats and triggers take-profit / stop-loss / anomaly callbacks.
-Uses PumpPortal's data API for stats (swap for your own indexer if you prefer).
+
+The stats source is intentionally pluggable: `get_stats` hits a configurable
+endpoint (`PUMP_DATA_URL`) and reads the first price-like field it finds. Point
+it at your preferred indexer (Helius / Bitquery / Moralis / your own) by setting
+`PUMP_DATA_URL` and, if needed, replacing the body of `get_stats` — the rest of
+the monitor only depends on it returning a dict with a numeric price field.
 """
 import os
 import time
@@ -517,16 +562,32 @@ import pumpportal_client
 
 DATA_URL = os.environ.get("PUMP_DATA_URL", "https://pumpportal.fun/api")
 POLL_SECONDS = float(os.environ.get("MONITOR_POLL_SECONDS", "5"))
+# Fields we accept as "price" from a stats provider, in priority order.
+_PRICE_FIELDS = ("price", "priceUsd", "price_usd", "marketCapSol", "usd_market_cap")
 
 
 def get_stats(mint: str, timeout: float = 15.0) -> dict:
-    """Best-effort token stats. Shape depends on the data provider; guarded."""
+    """Best-effort token stats. Shape depends on the data provider; guarded.
+
+    Returns the provider's JSON dict, or ``{"error": "..."}`` on any failure so
+    the caller never sees an exception.
+    """
     try:
         resp = requests.get(f"{DATA_URL}/data/token/{mint}", timeout=timeout)
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
+    except requests.RequestException as e:
+        return {"error": f"stats request failed: {e}"}
+    except ValueError as e:  # non-JSON body
+        return {"error": f"stats response not JSON: {e}"}
+
+
+def _extract_price(stats: dict) -> Optional[float]:
+    for field in _PRICE_FIELDS:
+        val = stats.get(field)
+        if isinstance(val, (int, float)) and val > 0:
+            return float(val)
+    return None
 
 
 def watch(
@@ -537,32 +598,47 @@ def watch(
     max_polls: int = 0,
     on_event: Optional[Callable[[str, dict], None]] = None,
     auto_sell: bool = True,
+    max_consecutive_errors: int = 10,
 ) -> dict:
-    """Watch `mint` until a threshold fires (or max_polls reached).
+    """Watch `mint` until a threshold fires (or a stop condition is reached).
 
-    Returns the terminal event dict. If `auto_sell`, exits 100% on TP/SL via
+    Returns the terminal event dict — one of ``take_profit``, ``stop_loss``,
+    ``timeout`` (max_polls reached), or ``error`` (the stats source failed
+    ``max_consecutive_errors`` times in a row, so we stop rather than spin
+    forever on a broken endpoint). If `auto_sell`, exits 100% on TP/SL via
     pumpportal_client.sell (bounded by risk_controls inside the client).
     """
     polls = 0
+    consecutive_errors = 0
     baseline = entry_price
     while True:
         stats = get_stats(mint)
-        price = stats.get("price") or stats.get("priceUsd") or stats.get("marketCapSol")
-        if price and baseline is None:
-            baseline = price
-        event = None
-        if price and baseline:
-            mult = price / baseline
-            if mult >= take_profit_mult:
-                event = {"type": "take_profit", "mult": mult, "price": price}
-            elif mult <= stop_loss_mult:
-                event = {"type": "stop_loss", "mult": mult, "price": price}
-        if event:
-            if on_event:
-                on_event(event["type"], event)
-            if auto_sell:
-                event["exit"] = pumpportal_client.sell(mint, percent=100.0)
-            return event
+        if stats.get("error"):
+            consecutive_errors += 1
+            if consecutive_errors >= max_consecutive_errors:
+                return {"type": "error", "reason": "stats source unavailable",
+                        "detail": stats.get("error"), "polls": polls}
+        else:
+            consecutive_errors = 0
+            price = _extract_price(stats)
+            if price:
+                if baseline is None:
+                    baseline = price
+                mult = price / baseline
+                event = None
+                if mult >= take_profit_mult:
+                    event = {"type": "take_profit", "mult": mult, "price": price}
+                elif mult <= stop_loss_mult:
+                    event = {"type": "stop_loss", "mult": mult, "price": price}
+                if event:
+                    if on_event:
+                        on_event(event["type"], event)
+                    if auto_sell:
+                        try:
+                            event["exit"] = pumpportal_client.sell(mint, percent=100.0)
+                        except Exception as e:  # surface, don't mask, the exit failure
+                            event["exit_error"] = str(e)
+                    return event
         polls += 1
         if max_polls and polls >= max_polls:
             return {"type": "timeout", "polls": polls, "last": stats}
