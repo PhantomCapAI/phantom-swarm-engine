@@ -1,10 +1,11 @@
 """Optional crypto payment gate (Solana) for bundle creation.
 
-Same model as before: it charges people to run a bundle job on **your hosted
-server**. The receiving wallet is operator-configured via ``CRYPTO_PAY_TO`` — it
-is deliberately NOT hardcoded, so a fork of this repo never silently pays someone
-else. Payment is a real on-chain transfer, verified against a Solana RPC before
-any work starts, and each transaction signature is single-use.
+It charges people to run a bundle job on **your hosted server**. The receiving
+wallet is operator-configured via ``CRYPTO_PAY_TO`` — deliberately NOT hardcoded,
+so a fork of this repo never silently pays someone else. Payment is a real
+on-chain transfer, verified against a Solana RPC before any work starts, and
+each transaction signature is single-use (persisted, so a redeploy can't reset
+replay protection).
 
 Multi-asset: the operator can accept several assets (e.g. SOL and USDC), each
 with its own price. The payer sends whichever they like; the server fetches the
@@ -26,15 +27,28 @@ Config (env, read at call time):
     USDC_MINT                          override USDC mint (e.g. for devnet)
     CRYPTO_NETWORK                     label, default "solana-mainnet"
     SOLANA_RPC_URL                     RPC endpoint (default public mainnet)
+    CRYPTO_COMMITMENT                  "confirmed" (default) or "finalized"
     CRYPTO_PAYMENTS_DEV_ACCEPT_TOKEN   testing-only: accept this exact signature
 """
 
+from __future__ import annotations
+
 import os
+from typing import Optional
 
 import httpx
 
+import config
+import store
+from logging_setup import get_logger
+
+log = get_logger("phantom.crypto")
+
 # Well-known assets so operators can just say "SOL" / "USDC".
 USDC_MAINNET_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# getTransaction only accepts these commitment levels.
+_VALID_COMMITMENTS = ("confirmed", "finalized")
 
 
 def _env(key: str, default: str = "") -> str:
@@ -51,7 +65,12 @@ def _rpc_url() -> str:
     return _env("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 
-def _known_asset(name: str) -> dict | None:
+def _commitment() -> str:
+    c = _env("CRYPTO_COMMITMENT", "confirmed").lower()
+    return c if c in _VALID_COMMITMENTS else "confirmed"
+
+
+def _known_asset(name: str) -> Optional[dict]:
     """Resolve a friendly asset name to a payment option (sans price)."""
     a = name.strip().upper()
     if a == "SOL":
@@ -77,14 +96,20 @@ def _accepted_options() -> list[dict]:
                 opt = dict(known)
                 opt["price"] = price
             elif len(bits) >= 3:  # custom SPL: MINT:price:decimals[:LABEL]
+                try:
+                    decimals = int(bits[2])
+                except ValueError:
+                    log.warning("crypto: bad decimals in CRYPTO_ACCEPT entry %r; skipping", part)
+                    continue
                 opt = {
                     "asset": bits[3] if len(bits) > 3 else name[:6],
                     "kind": "spl",
                     "mint": name,
-                    "decimals": int(bits[2]),
+                    "decimals": decimals,
                     "price": price,
                 }
             else:
+                log.warning("crypto: unrecognized CRYPTO_ACCEPT entry %r; skipping", part)
                 continue
             options.append(opt)
 
@@ -111,7 +136,7 @@ def _required(opt: dict) -> int:
     """Price in the asset's smallest unit."""
     try:
         return int(round(float(opt["price"]) * (10 ** opt["decimals"])))
-    except Exception:
+    except (TypeError, ValueError, KeyError):
         return 0
 
 
@@ -123,6 +148,7 @@ def pricing() -> dict:
         "enabled": enabled(),
         "provider": "crypto",
         "network": _env("CRYPTO_NETWORK", "solana-mainnet"),
+        "commitment": _commitment(),
         "pay_to": _env("CRYPTO_PAY_TO"),
         "options": public,
         # Convenience for simple UIs — the first accepted asset.
@@ -135,18 +161,44 @@ def pricing() -> dict:
     }
 
 
-async def _fetch_tx(sig: str) -> dict | None:
-    async with httpx.AsyncClient(timeout=20.0) as c:
-        r = await c.post(
-            _rpc_url(),
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTransaction",
-                "params": [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+async def _fetch_tx(sig: str) -> tuple[Optional[dict], Optional[str]]:
+    """Fetch a transaction by signature.
+
+    Returns ``(result, error)``. ``result`` is the RPC ``result`` object (or None
+    if the tx isn't found yet); ``error`` is a human message for RPC/transport
+    failures so the caller can distinguish "not found" from "RPC down".
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [
+            sig,
+            {
+                "encoding": "jsonParsed",
+                "maxSupportedTransactionVersion": 0,
+                "commitment": _commitment(),
             },
-        )
-        return r.json().get("result")
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=config.RPC_TIMEOUT_S) as c:
+            r = await c.post(_rpc_url(), json=payload)
+    except httpx.TimeoutException:
+        return None, "RPC timeout — the Solana endpoint did not respond in time"
+    except httpx.HTTPError as e:
+        return None, f"RPC transport error: {str(e)[:120]}"
+
+    if r.status_code != 200:
+        return None, f"RPC returned HTTP {r.status_code}"
+    try:
+        body = r.json()
+    except ValueError:
+        return None, "RPC returned non-JSON response"
+    if isinstance(body, dict) and body.get("error"):
+        msg = (body["error"] or {}).get("message", "unknown RPC error")
+        return None, f"RPC error: {msg}"
+    return body.get("result"), None
 
 
 def _check_sol(result: dict, pay_to: str, required: int) -> tuple[bool, str]:
@@ -167,7 +219,7 @@ def _check_sol(result: dict, pay_to: str, required: int) -> tuple[bool, str]:
         return False, "balance data missing"
     delta = post[idx] - pre[idx]
     if delta < required:
-        return False, f"insufficient: {delta} lamports, need {required}"
+        return False, f"insufficient: received {delta} lamports, need {required}"
     return True, "verified"
 
 
@@ -188,30 +240,46 @@ def _check_spl(result: dict, pay_to: str, mint: str, required: int) -> tuple[boo
     return False, "no matching token transfer to recipient"
 
 
-# Consumed signatures (replay protection). In-memory: resets on restart, which
-# only fails closed — a spent signature is never falsely accepted twice.
-_consumed: set = set()
+# In-memory mirror of consumed signatures for the current process. The durable
+# record lives in ``store`` (Redis or disk) so replay protection survives a
+# restart; this set just avoids a store round-trip on the hot path.
+_consumed: set[str] = set()
 
 
-async def verify(sig: str) -> tuple[bool, str, str | None]:
+def _is_consumed(sig: str) -> bool:
+    return sig in _consumed or store.is_signature_used(sig)
+
+
+async def verify(sig: str) -> tuple[bool, str, Optional[str]]:
     """Verify a payment. Returns (ok, reason, asset_paid).
 
-    Fetches the transaction once, then checks each accepted asset until one
-    satisfies its price. Accepts payment in whichever asset the payer chose.
+    Fetches the transaction once, confirms it succeeded on-chain (``meta.err``
+    is None), then checks each accepted asset until one satisfies its price.
     """
-    if sig in _consumed:
+    if not sig or not isinstance(sig, str) or len(sig) > 128:
+        return False, "invalid signature", None
+    if _is_consumed(sig):
         return False, "signature already used", None
 
-    result = await _fetch_tx(sig)
+    result, err = await _fetch_tx(sig)
+    if err:
+        return False, err, None
     if not result:
-        return False, "tx not found or not yet confirmed", None
-    if (result.get("meta") or {}).get("err") is not None:
-        return False, "tx failed on-chain", None
+        return False, "tx not found or not yet confirmed at the configured commitment level", None
+    meta = result.get("meta") or {}
+    if meta.get("err") is not None:
+        return False, "tx failed on-chain (meta.err is set)", None
 
     pay_to = _env("CRYPTO_PAY_TO")
-    reasons = []
+    if not pay_to:
+        return False, "server misconfigured: no receiving wallet", None
+
+    reasons: list[str] = []
     for opt in _accepted_options():
         required = _required(opt)
+        if required <= 0:
+            reasons.append(f"{opt['asset']}: invalid price configured")
+            continue
         if opt["kind"] == "native":
             ok, reason = _check_sol(result, pay_to, required)
         else:
@@ -223,8 +291,13 @@ async def verify(sig: str) -> tuple[bool, str, str | None]:
 
 
 def consume(sig: str) -> None:
+    """Mark a signature spent, in-process and durably."""
     if sig:
         _consumed.add(sig)
+        try:
+            store.mark_signature_used(sig)
+        except Exception as e:  # never fail a paid request over a storage hiccup
+            log.warning("crypto: could not persist consumed signature (%s)", str(e)[:120])
 
 
 async def check(headers) -> dict:
@@ -247,5 +320,7 @@ async def check(headers) -> dict:
     ok, reason, asset = await verify(sig)
     if ok:
         consume(sig)
+        log.info("crypto: payment verified (asset=%s)", asset)
         return {"ok": True, "via": "crypto", "tx": sig, "asset": asset}
+    log.info("crypto: payment rejected (%s)", reason)
     return {"ok": False, "via": "crypto", "reason": reason}

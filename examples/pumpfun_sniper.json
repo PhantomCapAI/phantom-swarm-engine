@@ -1,0 +1,7 @@
+{
+  "spec": "A pump.fun launch analyst and sniper agent. It watches for a newly launched mint, evaluates it fast (dev wallet holdings, bonding-curve progress, holder distribution, obvious rug signals), and if it passes the checks, snipes it with a configurable SOL amount and slippage using the PumpPortal Local Transaction API. After entry it monitors price and auto-exits on a take-profit multiple or a stop-loss, and bails immediately on anomalies like a sudden dev sell. Every buy/sell must pass hard risk controls (max spend, max slippage, kill-switch, dry-run). Targets: Claude Code and LangGraph.",
+  "mode": "full",
+  "agents": 8,
+  "tier": "standard",
+  "targets": ["claude-code", "langgraph", "solana-launch"]
+}

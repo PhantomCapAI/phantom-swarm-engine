@@ -1,0 +1,52 @@
+# Local / production deployment for phantom-swarm-engine.
+#
+#   docker compose up --build                 # engine only (disk storage)
+#   docker compose --profile redis up --build # engine + Redis (durable, scalable)
+#
+# Configuration comes from a .env file in this directory (copy .env.example).
+# With the `redis` profile, REDIS_URL is injected automatically and bundles +
+# consumed payment signatures survive restarts and are shared across replicas.
+services:
+  engine:
+    build: .
+    image: phantom-swarm-engine
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8500}:8500"
+    env_file:
+      - .env
+    environment:
+      # Point at the redis service when the `redis` profile is active. Harmless
+      # otherwise — the store pings and falls back to disk if it can't connect.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      BUNDLE_STORE_DIR: /data/bundles
+      LOG_JSON: ${LOG_JSON:-1}
+    volumes:
+      - bundle_data:/data/bundles
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8500/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+        required: false
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  bundle_data:
+  redis_data:

@@ -86,6 +86,14 @@ class GenerateFilesTests(unittest.TestCase):
     def test_langgraph_scaffold_is_valid_python(self):
         compile(self.files["targets/langgraph/graph.py"], "graph.py", "exec")
 
+    def test_langgraph_is_runnable_not_a_stub(self):
+        # The old scaffold raised NotImplementedError in call_llm; the fixed one
+        # ships a working call_llm (offline stub when no key) and builds a graph.
+        graph_src = self.files["targets/langgraph/graph.py"]
+        self.assertNotIn("NotImplementedError", graph_src)
+        self.assertIn("def call_llm", graph_src)
+        self.assertIn("offline stub", graph_src)
+
     def test_runnable_runtime_present_and_valid(self):
         # Every bundle ships a runnable app: run.py + agents.json at the root.
         self.assertIn("run.py", self.files)

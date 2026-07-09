@@ -6,3 +6,7 @@ tweepy==4.14.0
 apscheduler==3.10.4
 python-dateutil==2.9.0
 pyyaml==6.0.2
+slowapi==0.1.9
+# Optional: enables the Redis storage backend (set REDIS_URL to use it). The
+# code degrades gracefully to disk storage if this is absent or unreachable.
+redis==5.2.1
