@@ -269,6 +269,34 @@ A good resulting bundle contains:
   how to sequence them (upload → preflight → create → monitor).
 - **`examples/`** — launch, snipe, and safe-exit walkthroughs.
 
+A typical generated bundle for the launcher spec looks like this:
+
+```
+phantom-launch-agent/
+  README.md  manifest.json  bundle.yaml
+  run.py  agents.json                      # runnable multi-agent app (stdlib only)
+  prompts/system_prompt.md  prompts/personas.md
+  skills/                                  # launch-token, upload-metadata, wallet-signing,
+    launch-token.md  upload-metadata.md    #   launch-strategy, post-launch-monitor, risk-controls
+    wallet-signing.md  launch-strategy.md  #   (each: what it does + how to call it + example)
+    post-launch-monitor.md  risk-controls.md
+  examples/example_usage.md  examples/test_cases.json   # launch / snipe / safe-exit
+  targets/claude-code/
+    CLAUDE.md                              # system prompt + agents(+tools) + skills index
+    .claude/skills/<slug>/SKILL.md         # one per launch skill, Claude Code frontmatter
+  targets/config/agents.json  agents.yaml
+  targets/solana-launch/                   # the runnable tool suite (all valid Python)
+    pumpportal_client.py  ipfs_metadata.py  wallet.py
+    launch_strategy.py  monitor.py  risk_controls.py
+    tools.json  example_launch.py  requirements.txt  README.md
+  deploy/                                  # Dockerfile, docker-compose, zeabur, DEPLOY.md
+```
+
+Each skill in `skills/` and each Claude Code `SKILL.md` names the exact function
+it maps to in `targets/solana-launch/`, and `examples/` shows the call sequence
+(`upload_metadata` -> `preflight` -> `create_token` -> `watch`) — so the agent
+gets both the *how* (prose skills) and the *what* (callable code + `tools.json`).
+
 Two more ready specs ship in [`examples/`](examples/): a launch **analyst +
 sniper** (`pumpfun_sniper.json`) and a **multi-agent launch crew** — planner +
 executor + monitor (`pumpfun_launch_crew.json`).
