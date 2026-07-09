@@ -1,0 +1,7 @@
+{
+  "spec": "A pump.fun post-launch monitor and safe-exit agent. It does NOT launch or buy — it manages an existing position. Given a mint address and an entry price (or it establishes a baseline on first poll), it continuously watches price, market cap, and holder activity, and executes exits via the PumpPortal Local Transaction API: take-profit at a configurable multiple, stop-loss at a floor, a trailing stop that ratchets up as price rises, and an immediate bail on anomalies like a sudden dev sell or liquidity pull. All sells pass through the shared risk controls and honor a global kill-switch. It should support partial exits (e.g. sell 50% at 2x, rest at 4x) and log every decision. Targets: Claude Code and a generic config runtime.",
+  "mode": "full",
+  "agents": 6,
+  "tier": "standard",
+  "targets": ["claude-code", "config", "solana-launch"]
+}

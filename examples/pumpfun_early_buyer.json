@@ -1,0 +1,7 @@
+{
+  "spec": "A pump.fun sniper / early-buy agent focused on speed. It takes a mint address (or watches for one) and buys in as early as possible with a configurable SOL amount, slippage, and priority fee via the PumpPortal Local Transaction API, signing locally. Before every buy it runs fast safety checks — reject if the dev holds too large a share, if the bonding-curve progress looks like an obvious rug, or if slippage/spend would exceed the configured caps. It supports staggered entries across a few of my own funded wallets, and immediately hands the position to the monitor for take-profit / stop-loss. Optimize for low latency and tight risk. Targets: Claude Code and LangGraph.",
+  "mode": "full",
+  "agents": 8,
+  "tier": "standard",
+  "targets": ["claude-code", "langgraph", "solana-launch"]
+}

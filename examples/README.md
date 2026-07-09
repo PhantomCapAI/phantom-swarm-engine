@@ -24,6 +24,8 @@ curl -OJ http://localhost:8500/bundle/$SID/download    # download <slug>.zip
 | --- | --- |
 | `pumpfun_launcher.json` | Autonomous pump.fun **token launcher** (metadata → launch → monitor) |
 | `pumpfun_sniper.json` | Launch **analyst + sniper**: evaluate a new mint, snipe, auto-exit |
+| `pumpfun_early_buyer.json` | Low-latency **sniper / early-buy** agent with fast safety checks + staggered entries |
+| `pumpfun_monitor_exit.json` | **Post-launch monitor + safe exit**: TP / SL / trailing stop / anomaly bail (no launching) |
 | `pumpfun_launch_crew.json` | Multi-agent **launch crew**: planner + executor + monitor |
 
 Any spec mentioning pump.fun / token launches automatically gets the
